@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: BuildConfig
+metadata:
+  annotations:
+    pipeline.alpha.openshift.io/uses: '[{"name": "jobnameS", "namespace": "projetoS", "kind":
+      "DeploymentConfig"}]'
+  creationTimestamp: null
+  labels:
+    app: appnameS
+    name: appnameS
+  name: jobnameS
+spec:
+  output: {}
+  postCommit: {}
+  resources: {}
+  runPolicy: Serial
+  source:
+    type: None
+  strategy:
+    jenkinsPipelineStrategy:
+       jenkinsfile: |-
+          pipeline{
+                agent {label 'jenkins-slave-image-mgmt'}
+                    parameters{
+                         string(name: 'TagProducao', defaultValue: "", description: "Informe a Tag de HML")
+                         string(name: 'Gmud', defaultValue: "", description: "Informe o numero da Gmud")
+                        }
+                        environment {
+                             grupodeemail = 'leandro.carmo@pine.com,carlos.justo@pine.com,rodrigo.bonfim@pine.com,producao.producao@pine.com'
+                             appName = 'appnameS'
+                             appNamespace = 'projetoS'
+                             appNamespacePrd = 'PRDprojeto'
+                             clusterhml = 'https://lxcpnhhopen01.pine.com.br:8443'
+                             clusterprod = 'https://openshiftmasters.pine.com.br:8443'
+                             appimagestreamPRD = ''
+                             producao = 'nulo'
+                             deploymentHML = 'nulo'
+                             Producao = 'nulo'
+                             currentVersionImgPRDSelect = 'nulo'
+                             OpenshiftCRED = credentials('openshifthmltoprd')
+                        }
+                        stages {
+                          stage('RollBack PRD') {
+                            steps {
+                                script {
+                                    openshift.withCluster('Producao') {
+                                        openshift.withProject( "${appNamespacePrd}" ) {
+                                            if (Gmud != ""){
+                                                //Nome do Image Stream
+                                                 currentVersionImgPRDSelect = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.from.name
+                                                 appimagestreamPRD = sh(
+                                                 script: "echo ${currentVersionImgPRDSelect} |grep : |cut -d':' -f 1|sed -r 's/[[]//g'",
+                                                 returnStdout: true).trim()
+                                          
+                                                //Seleciona Deployment
+                                                def deploymentPRDRollout = openshift.selector('dc',"${appName}")
+                                                    
+                                                //Remove Trigger Current Value
+                                                def RemoveTrigger = openshift.set('triggers',"deploymentconfig","${appname}","--remove-all")
+                                                      
+                                                //Update Trigger
+                                                def UpdateTrigger = openshift.set('triggers',"deploymentconfig","${appname}","--from-image=${appNamespace}/${appimagestreamPRD}:${TagProducao}","-c ${appname}")
+                                                      
+                                                //Deploy Update
+                                                deploymentPRDRollout.rollout().latest()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            post {
+                            success{
+                                script {
+                                        if (producao == 'true') {
+                                             mail to: "${grupodeemail}",
+                                             from: "jenkins@pine.com",
+                                             subject: "RollBack Produção - Projeto ${appNamespace} aplicação ${appName}",
+                                             body: "RollBack da aplicação ${appName} para a versão ${TagProducao} realizado com sucesso no projeto ${appNamespace} através da Gmud ${Gmud}"
+                                        }
+                                    }
+                           }
+                         failure{
+                                script {
+                                    if (producao == 'null') {
+                                            mail to: "${grupodeemail}",
+                                            from: "jenkins@pine.com",
+                                            subject: "RollBack Produção - Projeto ${appNamespace} aplicação ${appName}",
+                                            body: "Erro no RollBack da aplicação ${appName} do projeto ${appNamespace} Gmud ${Gmud}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }  
+    triggers:
+parameters:

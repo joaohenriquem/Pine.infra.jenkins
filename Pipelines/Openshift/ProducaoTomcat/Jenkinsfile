@@ -1,0 +1,42 @@
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, goAheadEnv_new, goAheadEnv_old, testedc, routeexport, newApp, routeHml
+pipeline {
+    agent { 
+        label 'slave-jenkins-prod'
+    }
+	environment {
+		clusterhml = 'https://openshiftmasters.hml.pine.com:8443'
+        clusterprod = 'https://openshiftmaster.pine.com:8443'
+        registryHml = 'openregistry.hml.pine.com'
+        registryPrd = 'openregistry.pine.com.br'
+        OpenshiftCRED = credentials('openshifthmltoprd311')
+		
+		grupodeemail = 'tecnologia.infraestrutura@pine.com,noc@pine.com,leonardo.rocha@pine.com'
+		
+		copyPrd = "false"
+		deployedPrdNew = "null"
+		deployedPrdUpdate = "null"
+		SVC_port_numberHml = "false"
+		
+		PrdPublic_old = "false"
+		PrdPublic_new = "false"
+		producao_new = "false"
+		producao_old = "false"
+	}
+    parameters {
+	    string(defaultValue: "", description: "Numero Gmud", name: 'Gmud')
+        string(defaultValue: "", description: "Servidor", name: 'Servidor', trim: true)
+        string(defaultValue: "", description: "Sistema", name: 'Sistema')
+        string(defaultValue: "", description: "Versao", name: 'Versao')
+    }
+    stages {
+
+		stage('Dynatrace') {
+				steps {
+					script {
+						sh """curl -X POST https://xnc82234.live.dynatrace.com/api/v1/events -H 'Authorization: Api-token ujxHDbF_ReiXOUWTD7kyj' -H 'Content-Type: application/json' -d '{ "eventType": "CUSTOM_DEPLOYMENT", "attachRules": { "tagRule" : { "meTypes": ["SERVICE"], "tags": [ { "context": "CONTEXTLESS", "key": "TomcatContextRoot", "value": "${Sistema}" } ] } }, "deploymentName": "${Sistema}", "deploymentVersion": "${Versao}", "deploymentProject": "${Servidor}", "remediationAction": "http://revertMe", "ciBackLink": "Nulo", "source": "Jenkins", "customProperties": { "Jenkins Build Number": "${BUILD_ID}", "Git commit": "Nulo", "Gmud": "${Gmud}" } }'"""
+								}
+							}
+						}
+
+    }
+}  

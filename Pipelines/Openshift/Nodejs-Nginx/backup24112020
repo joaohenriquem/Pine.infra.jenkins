@@ -1,0 +1,691 @@
+import java.text.SimpleDateFormat
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, VersionBranch, version, StartBuild, StartBuildOutput, builds, buildOutput, sonarqualityresult, passarSonar
+pipeline {
+	agent {
+		label 'jenkins-slave-node'
+	}
+	environment {
+		SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+		repoName = "npm-artifacts"
+		ARTIFACTORYURL = "https://artifactory.hml.pine.com/artifactory"
+		ARTIFACTORYUSER = "svc135"
+		ArtifactoryTokenCred = credentials('ArtifactoryToken')
+	}
+	parameters {
+		string(defaultValue: "", description: '', name: 'projectKey') 
+		string(defaultValue: "", description: '', name: 'requestby')
+		string(defaultValue: "", description: '', name: 'repositoryUri')
+		string(defaultValue: "", description: '', name: 'buildNumber')
+		string(defaultValue: "", description: '', name: 'buildname')
+		string(defaultValue: "", description: '', name: 'branchName')
+		string(defaultValue: "", description: '', name: 'commit')
+		string(defaultValue: "", description: '', name: 'projectName')
+		string(defaultValue: "", description: '', name: 'imagename')
+		string(defaultValue: "", description: '', name: 'folderSource')
+		string(defaultValue: "enabled", description: '', name: 'sonarqubeStatus')
+		string(defaultValue: "enabled", description: '', name: 'fortifyStatus')
+		string(defaultValue: "", description: '', name: 'sonar_dt_limet_disable')
+	}
+	stages {
+		stage('Checkout') {
+			steps {
+				script {
+
+					// cria o arquivo entrypoint global
+								sh "echo '#!/bin/sh'>./entrypointglobal.sh"
+								sh "echo 'for tbl in \$(printenv | grep PINE_ )'>>./entrypointglobal.sh"
+								sh "echo 'do'>>./entrypointglobal.sh"
+								sh """echo 'A="\$(cut -d'=' -f1 <<<\$tbl)"'>>./entrypointglobal.sh"""
+								sh """echo 'B="\$(cut -d'=' -f2 <<<\$tbl)"'>>./entrypointglobal.sh"""
+								sh """echo 'sed -i "s/{{\$A}}/\$B/g" *.js'>>./entrypointglobal.sh"""
+								sh "echo 'done'>>./entrypointglobal.sh"
+								sh "echo 'exec ./entrypoint.sh'>>./entrypointglobal.sh"
+								sh "cat ./entrypointglobal.sh"
+
+					openshift.withCluster() {
+						openshift.withProject( "cicd" ) {
+							BC_JobName = "ci-${env.buildname.toLowerCase()}"
+							BC_JobName_Dev = "${BC_JobName}-dev"
+							BC_JobName_Hml = "${BC_JobName}-hml"
+						}
+					}
+					def defaultVersion = "1."
+					version = "${defaultVersion}${env.buildNumber}"
+					versionBuild = "${version}"
+					echo "${version}"
+
+					echo "Started job from TFS Build name: ${env.buildname}"
+					echo "New version: ${version}"
+
+					//Replace https to ssh
+					def gitURL = env.repositoryUri.replace('https', 'ssh')
+					def branchNameLocal = env.branchName.toLowerCase()
+					
+					//Branch Name
+					if (branchNameLocal.startsWith('desenvolvimento')) {
+						git branch: "${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					} else if (branchNameLocal.startsWith('release')) {
+						git branch: "Release/${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					} else if (branchNameLocal.startsWith('hotfix')) {
+						echo "Branch: Hotfix/${env.branchName}"
+						git branch: "Hotfix/${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					}
+				}
+			}
+		}
+		stage('Code Check') {
+			parallel {
+				stage('Sonarqube') {
+					stages{
+						stage('Build Artfact') {
+							steps {
+								script {
+									dir ("${env.folderSource}"){
+										
+										//Check Files Exist
+										echo "Build Step -- Check Nginx.conf file exist"
+										if (fileExists ("nginx/nginx.conf")){
+											sh """#!/bin/sh -e
+													rm -f nginx/nginx.conf
+													
+													"""
+										}
+										
+										//Entrypoint file replace sed command path
+										echo "Build Step -- Check Entrypoint.sh file exist"
+										if (fileExists ("nginx/entrypoint.sh")){
+											sh """#!/bin/sh -e 
+													sed -i 's#./main#/opt/app-root/src/main#g' nginx/entrypoint.sh
+													"""
+										}
+										else
+										{
+											echo "nginx/entrypoint.sh file or directory not found! Please add file and try again"
+										}
+										
+										//Default Conf file replace sed command path
+										echo "Build Step -- Default.conf file exist"
+										if (fileExists ("nginx/default.conf")){
+											sh """#!/bin/sh -e 
+												  sed -i 's#root /usr/share/nginx/html#root /opt/app-root/src#g' nginx/default.conf
+											   """
+										}
+										else
+										{
+											echo "nginx/entrypoint.sh file or directory not found! Please add file and try again"
+										}
+										
+										//defaunt conf file replace root path
+										echo "Build Step -- Replace defaunt.conf file content path"
+										if (fileExists ("nginx/default.conf")){
+											sh """#!/bin/sh -e
+													sed -i 's#root /usr/share/nginx/html#root /opt/app-root/src#g' nginx/default.conf
+													sed -i 's#include /etc/nginx/includes/redirects#include /opt/app-root/etc/nginx.default.d/redirects#g' nginx/default.conf
+													"""
+										}
+										else
+										{
+											echo "nginx/default.conf file or directory not found! Please add file and try again"
+										}
+										
+										//Remove package-lock.json file if exist
+										echo "Build Step -- Remove package-lock.json file if exist"
+										if (fileExists ("package-lock.json")){
+											sh """#!/bin/sh -e
+													rm -f package-lock.json
+													"""
+										}
+										
+										//Replace Value in the package-lock.json if file exist
+										if (fileExists ("package.json")){
+											sh """#!/bin/sh -e
+												sed -i 's#"nuxt": "^2.0.0"#"nuxt": "2.9.0"#g' package.json
+													
+													"""
+										}										
+						
+										// Set off SSL validate				
+										sh """#!/bin/sh -e
+												npm set strict-ssl false
+										"""
+										
+										// Set progress bar disable				
+										sh """#!/bin/sh -e
+												npm set progress=false
+												npm cache clean --force
+										"""
+										
+										// Change the npm registry mirror if provided
+										echo "Build Step -- Setting default regisry for NPM"
+										sh """#!/bin/sh -e
+										        npm config set registry https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/
+												npm i npmrc -g
+												npmrc -c pine
+												npm config set registry https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/
+												npm config set puppeteer_download_host=https://artifactory.hml.pine.com/artifactory/pine-github
+												npm config delete http-proxy
+												npm config delete https-proxy
+												npm config rm proxy
+												npm config rm https-proxy
+												set HTTP_PROXY=null
+												set HTTPS_PROXY=null
+												"""
+										
+										// Change the DEV_MODE to false
+										sh """#!/bin/sh -e
+												export DEV_MODE=false
+												"""
+										
+										// Set NODE_ENV to development
+										echo "Build Step -- Setting NODE_ENV"
+										sh """#!/bin/sh -e
+												export NODE_ENV=development
+												"""
+
+										sh """#!/bin/sh -e
+												export PUPPETEER_SKIP_DOWNLOAD=true
+												"""
+										
+										packagelines = sh (
+												script: "cat ./package.json",
+											returnStdout: true)
+																				
+										// Installing Chromedriver & Puppeter
+										
+										// if (packagelines.contains('prerender-spa-plugin')){
+										//     echo "Build Step -- Npm install Puppeter"
+										// 	sh """
+										// 		npm cache clean --force
+										// 		npm install puppeteer@2.0.0 --registry=https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/
+										// 		npm install chromedriver --chromedriver_cdnurl=https://artifactory.hml.pine.com/artifactory/pine-github
+										// 		npm install html-webpack-plugin --registry=https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/
+										// 		npm install prerender-loader --registry=https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/ --force
+										// 		"""
+										// }
+										
+										//Remove Chromedriver
+										
+										if (packagelines.contains('chromedriver') && !packagelines.contains('prerender-spa-plugin')){
+										    echo "Build Step -- Npm install Chromedriver"
+											sh """#!/bin/sh -e
+												sed -i '/chromedriver/d' ./package.json
+												"""
+										}
+
+										// configura as dependencias para pactoes locais do pine
+										sh "npm config set @pine:registry http://artifactory.hml.pine.com/artifactory/api/npm/npm-private/"
+
+
+										if (packagelines.contains('prerender-spa-plugin')){
+										    echo "limpar itens..."
+											sh """#!/bin/sh -e
+												sed -i '/puppeteer/d' ./package.json
+												sed -i '/prerender/d' ./package.json
+												sed -i '/prerender-spa-plugin/d' ./package.json
+												"""
+										}
+
+										// Installing all dependencies
+										echo "Build Step -- Npm install"
+										
+										// if (!packagelines.contains('chromedriver')){
+										// 	npm_install = sh (
+										// 		script: "npm install --registry=https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/ --sass-binary-site=https://artifactory.hml.pine.com/artifactory/pine-github --no-audit --no-package-lock --no-warning --no-deprecation",
+										// 	returnStdout: true).trim()
+										// }
+										// else
+										// {
+											// adicionamos a variavel par nao falhar no momento do download do binario
+											sh "export NODE_TLS_REJECT_UNAUTHORIZED=0"
+											// sh "export NODE_TLS_REJECT_UNAUTHORIZED=0 && export PUPPETEER_CHROMIUM_REVISION=706915"
+											sh "export npm_config_dist_url=https://artifactory.hml.pine.com/artifactory/pine-github"
+											// sh "npm install -g node-gyp"
+											// dependencias para o node gyp
+											// sh "sudo yum install gcc-c++"
+											// sh "sudo yum groupinstall 'Development Tools'"
+
+											sh "npm install --registry=https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/ --sass-binary-site=https://artifactory.hml.pine.com/artifactory/pine-github --chromedriver_cdnurl=https://artifactory.hml.pine.com/artifactory/pine-github --no-audit --no-package-lock --no-optional --no-deprecation --force --verbose"
+										// }
+
+											if (packagelines.contains('Pine Site Institucional')){
+										    	echo "Build Step -- Npm install Puppeter"
+												sh """
+													npm install --force puppeteer@5.3.1 prerender prerender-spa-plugin --unsafe-perm=true --allow-root --registry=https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/ --puppeteer-download-host=http://artifactory.hml.pine.com/artifactory/pine-github 
+												"""
+											}
+										
+										// do not fail when there is no build script
+										echo "Build Step -- Running script Build..."
+
+										// lsoutput = sh (
+										// 		script: "npm install --registry=https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/ --sass-binary-site=https://artifactory.hml.pine.com/artifactory/pine-github --no-audit --no-package-lock --no-warning --no-deprecation",
+										// 	returnStdout: true).trim()
+
+
+										sh """#!/bin/sh -e
+												npm run build --prod --if-present --force
+												"""
+										
+										sh """#!/bin/sh -e
+												mkdir artifact
+												mv dist artifact/
+												mv nginx artifact/
+												"""
+										
+										zip zipFile: "${env.projectKey}-${versionBuild}.zip", archive: false, dir: 'artifact/'
+
+										sh """#!/bin/sh -e
+											rm -rf artifact
+											"""
+									}
+								}
+							}
+						}
+						stage('Check Code'){
+							when {
+								expression { env.sonarqubeStatus == 'enabled' }
+							}
+							steps {
+								script {
+									def sonarScanner = tool 'nodejs-sonar-scanner42'
+									withSonarQubeEnv('sonarpine') {
+										def sonarScannerBin = "${sonarScanner}/sonar-scanner-4.2.0.1873-linux/bin/sonar-scanner"
+										sh "rm -f package-lock.json"
+										sh "npm set strict-ssl false"
+										sh "npm config set registry http://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/"
+										sh """
+										export SONAR_SCANNER_OPTS="-Xmx4096m"
+										export JAVA_TOOL_OPTIONS="-XX:+UnlockExperimentalVMOptions"
+										${sonarScannerBin} -Dsonar.projectKey=${env.projectKey} -Dsonar.sources=. -Dsonar.exclusions=node_modules/** -Dsonar.exclusions=prerendered/** -Dsonar.host.url=\"${SONAR_HOST_URL}\" -Dsonar.sourceEncoding=\"UTF-8\" 
+										"""
+										
+										//Sonarqube Sempre true
+										passarSonar = true 
+
+										if(sonar_dt_limet_disable != null && sonar_dt_limet_disable != ""){
+
+											def format = new SimpleDateFormat("dd-MM-yyyy") 
+											def dateDisable = format.parse(sonar_dt_limet_disable ) 
+
+											def date = new Date()
+											if(dateDisable > date ){
+												passarSonar = false
+											}
+										}
+									}
+									
+									//Check quality gate Result
+									def qualityGateResult = null
+									timeout(time: 30, unit: 'MINUTES') {
+										qualityGateResult = waitForQualityGate()
+									}	
+										
+									if (passarSonar) {
+										if(qualityGateResult.status == 'OK') {
+											echo "Sonar quality gateway - Projeto passou no teste de qualidade!"
+											sonarqualityresult = "ok"
+										} else {
+											error "Sonar quality gateway - Projeto nao passou no teste de qualidade do Sonarqube!"
+											sonarqualityresult = "false"
+										}
+									} else {
+										echo "Sonar quality gateway - Codigo foi analisado pelo Sonarqube porem sera ignorado o resultado ate ${sonar_dt_limet_disable}"
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		stage('Upload Artifactory') {
+			steps {
+				script {
+				    dir ("${env.folderSource}"){
+						if (fileExists ("${env.projectKey}-${versionBuild}.zip")){
+
+							// Obtain an Artifactory server instance
+							def server = Artifactory.server "artfactoryserver"
+							
+							def buildInfo = Artifactory.newBuildInfo()
+							// Set custom build name and number.
+							buildInfo.setName "${env.projectKey}"
+							buildInfo.setNumber "${versionBuild}"
+							
+							// define the upload spec
+							def uploadSpec = """{
+							"files": [
+								{
+								"pattern": "${env.projectKey}-${versionBuild}.zip",
+								"regexp": "true",
+								"target": "${repoName}/${env.projectKey}/",
+								"flat": "false",
+								"recursive": "true"
+								}
+							]
+							}"""
+							
+							// Upload to Artifactory.
+							def buildUpload = server.upload spec: uploadSpec, buildInfo: buildInfo
+							
+							// Publish the build to Artifactory
+							server.publishBuildInfo buildInfo
+						}
+					}
+				}
+			}
+		}
+		stage('Publish Dev') {
+			when {
+				expression { env.branchName.toLowerCase().startsWith('desenvolvimento') }
+			}
+			steps {
+				script {
+					openshift.withCluster() {
+						openshift.withProject( "cicd" ) {
+							echo "Publish branch ${env.branchName}"
+							version = "${versionBuild}"
+							BC_JobName = BC_JobName_Dev
+							def DC_Name = "${env.imagename.toLowerCase()}"
+							DC_Name1="${DC_Name.replace(".", "")}"
+							DC_Name2="${DC_Name.replace(".", "-")}"
+				
+							if (!openshift.selector( "bc/${BC_JobName}" ).exists() ) {
+								echo "BuildConfig nao existe no Openshift"
+								def imageStrTag = "${env.imagename.toLowerCase()}:${version}"
+
+								openshift.withProject( "${env.projectName}-dev" ) {
+									def imageStr = "${env.imagename.toLowerCase()}"
+									echo "creating imagestream if no exist"
+									if (!openshift.selector("is/${imageStr}").exists()) {
+										openshift.create("imagestream","${imageStr}")
+										echo "Imagestream created"
+									}
+								}
+								openshift.withProject( "cicd" ) {
+									dir ("${env.folderSource}"){
+											echo "Creating buildconfig no openshift"
+											openshift.create(openshift.process("ngnix-dockerfile-dev","-p=NAME=${BC_JobName}","-p=IMAGESTREAM=${env.imagename}:${version}","-p=NAMESPACE=${env.projectName}"))
+											echo "iniciando build"
+											StartBuildOutput = openshift.selector("bc/${BC_JobName}").startBuild("--from-dir=./${env.projectKey}-${versionBuild}.zip","--follow")
+											buildOutput = openshift.selector("bc/${BC_JobName}").related('builds')
+										}
+									}
+								}
+							else
+							{
+									echo "BuildConfig ja existe no Openshift"
+									openshift.withProject( "cicd" ) {
+										openshift.patch("bc/${BC_JobName}",'\'{"spec":{"output":{"to":{"name":"'+"${env.imagename}:${version}"+'"}}}}\'')
+								    dir ("${env.folderSource}"){
+										//Runtime Image
+										StartBuildOutput = openshift.selector("bc/${BC_JobName}").startBuild("--from-dir=./${env.projectKey}-${versionBuild}.zip","--follow")
+										buildOutput = openshift.selector("bc/${BC_JobName}").related('builds')
+										echo "${StartBuildOutput}"
+									}
+								}
+							
+							}	
+							openshift.withProject( "${env.projectName}-dev" ) {						
+								if (openshift.selector( "dc/${DC_Name1}" ).exists()) {
+									DC_Name = "${DC_Name1}"
+								}
+								if (openshift.selector( "dc/${DC_Name2}" ).exists()) {
+									DC_Name = "${DC_Name2}"
+								}
+
+								//Definindo o caminho do arquivo Launch Settings - Inicio -->
+								json_path = "${env.buildFile}".split('/')
+								String res = "";
+								for(int i = 0 ; i < json_path.length - 1; i++ )
+								{
+									res += json_path[i] + "/"
+								}
+								json_path = res
+
+								if (fileExists ("${json_path}env-vars.json")){
+										sh "iconv -t UTF-8//IGNORE --output=\'${json_path}env-vars-utf8.json\' \'${json_path}env-vars.json\'"
+										def json_file = readJSON file: "${json_path}env-vars-utf8.json"
+										//Definindo o caminho do arquivo Launch Settings - Fim <--
+								
+										//Aplicando variaveis de ambiente em HML - Inicio -->
+										def json_variables = json_file.profiles.Development.environmentVariables
+									
+										json_variables.eachWithIndex {
+											envVarItem, i ->    
+												dcEnvSelect = sh (
+													script: """
+														oc set env dc/${DC_Name} \'${envVarItem.key}\'=\'${envVarItem.value}\' -n ${env.projectName}
+													""",
+												returnStdout: true).trim()
+										}
+										echo "Aplicou variaveis de Ambiente"
+										//Aplicando variaveis de ambiente em HML -  - Fim <--
+									}
+									else
+									{
+										echo "Arquivo env-vars nao encontrado - Nao sera aplicado variaveis de Ambiente"
+									}
+
+							
+
+
+								if (openshift.selector( "dc/${DC_Name}" ).exists())  {
+									
+									//Remove triggers - Inicio -->
+									openshift.set("triggers","dc/${DC_Name}","--remove-all")
+									//Remove triggers - Fim <--
+
+									//Aplicando nova versao de container em DEV - Inicio -->
+									openshift.set("triggers","dc/${DC_Name}","--from-image=${env.projectName}-dev/${env.imagename}:${version}","-c ${DC_Name}","--manual=true")
+									dcDev = openshift.selector('dc',"${DC_Name}")
+									def rm = dcDev.rollout()
+									//Aplicando nova versao de container em DEV -  - Fim <--
+									
+									//Validacao de porta do container em DEV - Inicio -->
+									def SVC_port_number = openshift.selector("route","${DC_Name}").object().spec.port.targetPort
+										
+									if (SVC_port_number.toString() != "8080-tcp" && SVC_port_number.toString() != "null"){
+										UpdateSVCName = sh (
+											script: """
+												oc patch svc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/name", "value":8080-tcp}]' -n ${env.projectName}-dev
+												""",
+											returnStdout: true).trim() 
+										
+										UpdateSVCnumber = sh (
+											script: """
+												oc patch svc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/port", "value":8080}]' -n ${env.projectName}-dev
+											""",
+											returnStdout: true).trim() 
+										
+										UpdateSVCtarget = sh (
+											script: """
+												oc patch svc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/targetPort", "value":8080}]' -n ${env.projectName}-dev
+											""",
+											returnStdout: true).trim()
+							
+										UpdateDCPort = sh (
+											script: """
+												oc patch dc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/template/spec/containers/0/ports/0/containerPort", "value":8080}]' -n ${env.projectName}-dev
+											""",
+											returnStdout: true).trim()
+							
+										UpdateSVCroute = sh (
+											script: """
+												oc patch route ${DC_Name} -p '{"spec":{"port":{"targetPort":"8080-tcp"}}}' -n ${env.projectName}-dev
+											""",
+											returnStdout: true).trim()
+									}
+									//Validacao de porta do container em DEV - Fim <--
+									
+									//Aplicando Deploy em DEV - Inicio -->
+									rm.latest()	
+									//Aplicando Deploy em DEV - Fim <--
+								}
+								else {
+									def imagestream="${env.imagename}:${version}"
+									openshift.newApp("${imagestream}","--name=${DC_Name2}").narrow('svc').expose("--hostname=${DC_Name1}.dev.pine.com")
+								}
+							}
+						}
+					}       
+				}
+			}
+		}
+		stage('Publish Hml') {
+			when {
+				expression { env.branchName.toLowerCase().startsWith('release') }
+			}
+			steps {
+				script {
+					openshift.withCluster() {
+						openshift.withProject( "cicd" ) {
+							echo "Publish branch ${env.branchName}"
+							version = "${versionBuild}"
+							BC_JobName = BC_JobName_Hml
+							def DC_Name = "${env.imagename.toLowerCase()}"
+							DC_Name1="${DC_Name.replace(".", "")}"
+							DC_Name2="${DC_Name.replace(".", "-")}"
+					
+							if (!openshift.selector( "bc/${BC_JobName}" ).exists() ) {
+									def imageStrTag = "${env.imagename.toLowerCase()}:${version}"
+								
+								openshift.withProject( "${env.projectName}" ) {
+																		def imageStr = "${env.imagename.toLowerCase()}"							
+												if (!openshift.selector("is/${imageStr}").exists()) {
+									openshift.create("imagestream","${imageStr}")
+									}
+								}
+								openshift.withProject( "cicd" ) {
+									openshift.create(openshift.process("ngnix-dockerfile-hml","-p=NAME=${BC_JobName}","-p=IMAGESTREAM=${env.imagename}:${version}","-p=NAMESPACE=${env.projectName}"))
+									
+									dir ("${env.folderSource}"){
+										StartBuildOutput = openshift.selector("bc/${BC_JobName}").startBuild("--from-dir=./${env.projectKey}-${versionBuild}.zip","--follow")
+										buildOutput = openshift.selector("bc/${BC_JobName}").related('builds')
+									}
+									echo "${StartBuildOutput}"
+								}
+							}
+							else
+							{
+								echo "BuildConfig ja existe no Openshift"
+											openshift.withProject( "cicd" ) {
+										//openshift.patch("bc/${BC_JobName}",'\'{"spec":{"output":{"to":{"name":"'+"${env.imagename}:${version}"+'"}}}}\'')
+										
+										dir ("${env.folderSource}"){
+											//Runtime Image
+											StartBuildOutput = openshift.selector("bc/${BC_JobName}").startBuild("--from-dir=./${env.projectKey}-${versionBuild}.zip","--follow")
+											buildOutput = openshift.selector("bc/${BC_JobName}").related('builds')
+										}
+										echo "${StartBuildOutput}"
+									}
+							}	
+							openshift.withProject( "${env.projectName}" ) {		
+								if (openshift.selector( "dc/${DC_Name1}" ).exists()) {
+									DC_Name = "${DC_Name1}"
+								}
+								if (openshift.selector( "dc/${DC_Name2}" ).exists()) {
+									DC_Name = "${DC_Name2}"
+								}
+
+
+								//Definindo o caminho do arquivo Launch Settings - Inicio -->
+								json_path = "${env.buildFile}".split('/')
+								String res = "";
+								for(int i = 0 ; i < json_path.length - 1; i++ )
+								{
+									res += json_path[i] + "/"
+								}
+								json_path = res
+
+								if (fileExists ("${json_path}env-vars.json")){
+										sh "iconv -t UTF-8//IGNORE --output=\'${json_path}env-vars-utf8.json\' \'${json_path}env-vars.json\'"
+										def json_file = readJSON file: "${json_path}env-vars-utf8.json"
+										//Definindo o caminho do arquivo Launch Settings - Fim <--
+								
+										//Aplicando variaveis de ambiente em HML - Inicio -->
+										def json_variables = json_file.profiles.Development.environmentVariables
+									
+										json_variables.eachWithIndex {
+											envVarItem, i ->    
+												dcEnvSelect = sh (
+													script: """
+														oc set env dc/${DC_Name} \'${envVarItem.key}\'=\'${envVarItem.value}\' -n ${env.projectName}
+													""",
+												returnStdout: true).trim()
+										}
+										echo "Aplicou variaveis de Ambiente"
+										//Aplicando variaveis de ambiente em HML -  - Fim <--
+									}
+									else
+									{
+										echo "Arquivo env-vars nao encontrado - Nao sera aplicado variaveis de Ambiente"
+									}
+
+
+												 	
+
+								if (openshift.selector( "dc/${DC_Name}" ).exists())  {
+									
+									//Remove triggers - Inicio -->
+									openshift.set("triggers","dc/${DC_Name}","--remove-all")
+									//Remove triggers - Fim <--
+									
+									//Aplicando nova versao de container em HML - Inicio -->
+									openshift.set("triggers","dc/${DC_Name}","--from-image=${env.projectName}/${env.imagename}:${version}","-c ${DC_Name}","--manual=true")
+									dcHml = openshift.selector('dc',"${DC_Name}")
+									def rm = dcHml.rollout()
+									//Aplicando nova versao de container em HML -  - Fim <--
+									
+									//Validacao de porta do container em HML - Inicio -->
+									def SVC_port_number = openshift.selector("route","${DC_Name}").object().spec.port.targetPort
+												
+									if (SVC_port_number.toString() != "8080-tcp" && SVC_port_number.toString() != "null"){
+										UpdateSVCName = sh (
+											script: """
+												oc patch svc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/name", "value":8080-tcp}]' -n ${env.projectName}
+												""",
+											returnStdout: true).trim() 
+															
+										UpdateSVCnumber = sh (
+											script: """
+												oc patch svc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/port", "value":8080}]' -n ${env.projectName}
+												""",
+											returnStdout: true).trim() 
+															
+										UpdateSVCtarget = sh (
+											script: """
+												oc patch svc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/targetPort", "value":8080}]' -n ${env.projectName}
+												""",
+											returnStdout: true).trim()
+
+										UpdateDCPort = sh (
+											script: """
+												oc patch dc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/template/spec/containers/0/ports/0/containerPort", "value":8080}]' -n ${env.projectName}
+												""",
+											returnStdout: true).trim()
+												
+										UpdateSVCroute = sh (
+											script: """
+												oc patch route ${DC_Name} -p '{"spec":{"port":{"targetPort":"8080-tcp"}}}' -n ${env.projectName}
+												""",
+											returnStdout: true).trim()
+									}
+											//Validacao de porta do container em HML - Fim <--
+									
+									//Aplicando Deploy em HML - Inicio -->
+									rm.latest()	
+									//Aplicando Deploy em HML - Fim <--
+								}
+								else {
+									def imagestream="${env.imagename}:${version}"
+									openshift.newApp("${imagestream}","--name=${DC_Name2}").narrow('svc').expose("--hostname=${DC_Name1}.hml.pine.com")
+								}
+							}
+						}
+					}       
+				}
+			}
+		}
+	}
+}

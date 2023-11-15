@@ -1,0 +1,102 @@
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, VersionBranch
+pipeline {
+    agent { 
+        label 'jenkins-slave-node-fortify'
+    }
+	environment {
+	    SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+	}
+    parameters {
+	    string(defaultValue: "", description: '', name: 'projectKey') 
+		string(defaultValue: "", description: '', name: 'requestby')
+		string(defaultValue: "", description: '', name: 'repositoryUri')
+		string(defaultValue: "", description: '', name: 'buildNumber')
+		string(defaultValue: "", description: '', name: 'buildname')
+        string(defaultValue: "", description: '', name: 'branchName')
+		string(defaultValue: "", description: '', name: 'commit')
+		string(defaultValue: "", description: '', name: 'projectName')
+		string(defaultValue: "", description: '', name: 'imagename')
+		string(defaultValue: "", description: '', name: 'folderSource')
+        string(defaultValue: "enabled", description: '', name: 'sonarqubeStatus')
+        string(defaultValue: "enabled", description: '', name: 'fortify')
+    }
+    stages {
+        stage('Build Config') {
+            steps {
+                script {		        
+                    openshift.withCluster('Homologacao') {
+					    openshift.withProject( "cicd" ) {
+						    BC_JobName = "ci-${env.buildname.toLowerCase()}"
+							BC_JobName_Dev = "${BC_JobName}-dev"
+							BC_JobName_Hml = "${BC_JobName}-hml"
+							
+							if (openshift.selector("bc/${BC_JobName_Dev}").exists()) {
+					            def currentsource = openshift.selector("bc","${BC_JobName_Dev}").object().spec.source.git.ref
+					            def newsource = "${env.commit}"							
+					            if (currentsource == newsource){
+						            buildPatch = "nopatch"
+					            }
+							}
+							if (openshift.selector("bc/${BC_JobName_Hml}").exists()) {
+					            def currentsource = openshift.selector("bc","${BC_JobName_Hml}").object().spec.source.git.ref
+					            def newsource = "${env.commit}"							
+					            if (currentsource == newsource){
+						            buildPatch = "nopatch"
+					            }
+							}
+						}
+					}
+                }
+            }
+        }
+        stage('Checkout') {
+            steps {
+                script {
+				    def gitURL = env.repositoryUri.replace('https', 'ssh')
+					if (env.branchName.startsWith('release'))
+					{					
+						git branch: "Release/${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					}else
+					{					
+						git branch: "${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					}
+                    def versionFile = sh(script: 'cat version', returnStdout: true).trim()
+					echo "${versionFile}"
+                    def version = "${versionFile}${env.buildNumber}" 
+                    echo "Started job from TFS Build name: ${env.buildname}"
+                    echo "New version: ${version}"
+                }
+            }
+        }
+		stage('Fortify') {
+            when {
+                    expression { env.fortify == 'enable' }
+            }
+            steps {
+                script {
+				    dir ("${env.folderSource}"){
+					    def FortifyHome = '/opt/Fortify/Fortify_SCA_and_Apps_19.1.0/bin/'
+					    if (env.branchName.startsWith('release'))
+					    {					
+						    VersionBranch="release"
+					    }
+						if (env.branchName.startsWith('desenvolvimento'))
+					    {					
+						    VersionBranch="desenvolvimento"
+					    }
+						sh "java -jar \"${FortifyHome}fortify-api-client.jar\" create -n \"${env.projectKey.toLowerCase()}\" -v \"${VersionBranch}\""
+						sh "\"${FortifyHome}fortifyupdate\" -url \"https://fortify.pine.com/ssc\" -acceptKey -acceptSSLCertificate"
+						sh "\"${FortifyHome}sourceanalyzer\" -b \"${env.buildname.toLowerCase()}\" -clean "						
+						sh "rm -f package-lock.json"
+						sh "npm set strict-ssl false"
+						sh "npm config set registry http://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/"
+						sh "npm config set proxy http://pineproxy03.pine.com.br:8080"
+						sh """ ${FortifyHome}sourceanalyzer -b "${env.buildname.toLowerCase()}" "." """
+						sh "\"${FortifyHome}sourceanalyzer\" -b \"${env.buildname.toLowerCase()}\" -scan -f \"results.fpr\" "
+						sh "\"${FortifyHome}fortifyclient\" -url \"https://fortify.pine.com/ssc\" -authtoken \"f16410dc-4fc7-4b26-b7f9-93f4da46e07f\" uploadFPR -f \"results.fpr\" -project \"${env.projectKey.toLowerCase()}\" -version \"${VersionBranch}\" "
+						}
+                }
+            }
+        }
+    }
+}

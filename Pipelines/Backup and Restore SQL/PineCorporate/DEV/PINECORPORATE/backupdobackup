@@ -1,0 +1,44 @@
+import groovy.json.JsonSlurper
+
+pipeline {
+         agent any
+            environment {
+					script = 'USE DBAPINE_CUBE SELECT * FROM dbo.dbuserinfo'
+					bdname = ""
+				    bkpstatus = ''
+                    rebuild = 'null'
+                    userInput = 'null'
+                    goAhead1 = "null"			
+				    sqlcmd_path = "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\110\\Tools\\Binn"
+				    SQLCRED = credentials('sqlbkprestore')
+                    validabackup = 'null'
+                    validarestore = 'null'					
+					
+            }
+            stages {                  
+                stage('Execucao - do Script') {
+                    steps {
+						ws("${sqlcmd_path}"){
+                            script {
+							    if (changenumber != "") {
+									echo"${env.APIchangeAttachment}${changenumber}"
+                                    attachments = attachments.toUpperCase()
+									def textoconvertido = attachments.substring(attachments.indexOf('*'), attachments.length())
+
+                                    removeasterisco = powershell (
+                                    script: """
+                                             ${textoconvertido} = echo ${textoconvertido} | select-object -first 1
+											 """,
+                                             returnStdout: script)
+									echo "$removeasterisco"
+									echo"Script Executado com sucesso."
+
+                                }
+                            }
+                            
+                        }
+                    }
+                }
+					
+        }
+}       

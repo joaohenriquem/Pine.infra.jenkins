@@ -1,0 +1,132 @@
+@Library('JenkinsSharedLibrary')
+
+import java.text.SimpleDateFormat
+import com.pine.openshiftLib
+import com.pine.nugetLib
+import com.pine.gitLib
+import groovy.json.JsonSlurper
+
+def isPacFileName, packName
+
+pipeline {	
+    agent { 
+        label 'slave-aspnet-windows-etl-01'
+    }
+	environment {
+		artifactoryRepository = 'pacotes-etl'
+		artifactoryCredential = 'ArtifactoryToken'
+		artifactoryUrl = 'https://artifactory.hml.pine.com/artifactory'
+		outputLineBreak = '***********************************************************************************************************************************'
+	}	
+    parameters {
+	    string(name: 'applicationName'     , defaultValue: ''  , description: 'Nome da aplicação (igual ao nome do repositório git)') 
+		string(name: 'requestedBy'         , defaultValue: ''  , description: 'Nome do solicitante')
+		string(name: 'repositoryUri'       , defaultValue: ''  , description: 'Endereço do repositório git')
+		string(name: 'buildNumber'         , defaultValue: ''  , description: 'Número do build no tfs')
+        string(name: 'branchName'          , defaultValue: ''  , description: 'Nome da branch')
+		string(name: 'commit'              , defaultValue: ''  , description: 'Commit a ser construído (por padrão, deve ser o mais recente da branch)')
+		string(name: 'ssisProjectFolder'   , defaultValue: ''  , description: 'Nome da pasta do projeto no catálogo do SSIS')
+		string(name: 'ssisProjectName'     , defaultValue: ''  , description: 'Nome do projeto no catálogo do SSIS')
+		string(name: 'ssisServer'          , defaultValue: ''  , description: 'Nome do servidor SSIS ')
+    }
+	
+    stages {	
+        stage('checkout') {
+            steps {
+                script {				
+                    echo "${env.branchName}"
+                    
+                    def gitURL = env.repositoryUri
+                    if (env.branchName.startsWith('release')) {                    
+                        git branch: "Release/${env.branchName}", credentialsId: 'jenkins-slave-user', url: "${gitURL}"
+                    } else {          
+						git branch: "${env.branchName}", credentialsid: 'jenkins-slave-user', url: "${gitURL}"
+                    }
+                    
+                    echo "Started job from TFS Build name: ${env.applicationName}"
+                    echo "Version: ${env.buildNumber}"					
+                }
+            }
+        }		
+		stage('Compliance') {
+            steps {
+				script {
+				    def gitLib = new gitLib(this, 'hml')
+                    //Verifica se branch está 0 commits atrás da master
+                    gitLib.checkIfBehindMaster("Release/${env.branchName}", env.repositoryUri)
+    			}
+            }
+        }		
+        stage('Build') {
+            steps {
+				script {
+					stdout = bat(returnStdout: true, script: "dir *.dtproj /b /s").trim()
+                    String[] scriptFiles = stdout.readLines().drop(1);
+										
+					 if(scriptFiles.size() > 0) {
+						echo "Executando: ${scriptFiles[0]}"
+						//SSISBuild.exe -project|-p:<dtproj file path> [-configuration|-c:<configuration name>] [-projectPassword|-pp:<project password>] [-stripSensitive|-ss] [-output|-o:<output path>] [-log|-l:<log level>[;<log path>]] [-quiet|-q] [-help|-h|-?]
+						stdout = bat(returnStdout: true, script: "SSISBuild -p:${scriptFiles[0]}")
+						echo outputLineBreak
+					 }
+				}			
+            }
+        }		
+		stage('Publish') {
+            steps {
+				script {
+					stdout = bat(returnStdout: true, script: "dir *.ispac /b /s").trim()
+					String[] scriptFiles = stdout.readLines().drop(1);
+										
+					 if(scriptFiles.size() > 0) {
+						 isPacFileName = scriptFiles[0]
+						//SSISDeploy.exe -source|-s:<source path> -destination|-d:<type>;<path>[;server] [-authType|-at:<auth type name>] [-connectionStringSuffix|-css:<connection string suffix>] [-projectPassword|-pp:<project password>] [-username|-u:<username>] [-password|-p:<password>] [-log|-l:<log level>[;<log path>]] [-quiet|-q] [-help|-h|-?]						
+						withCredentials([usernamePassword(credentialsId: 'hsvc265', passwordVariable: 'credential_pwd', usernameVariable: 'credential_usr')]) {
+							echo "Publishing: ${isPacFileName} in ${env.ssisServer}/SSISDB/${env.ssisProjectFolder}/${env.ssisProjectName}"
+							stdout = bat(returnStdout: true, script: "SSISDeploy -s:${isPacFileName} -d:catalog;/SSISDB/${env.ssisProjectFolder}/${env.ssisProjectName};${env.ssisServer} -at:win")
+							
+							echo stdout
+							echo outputLineBreak
+							echo "Compactando ispac..."
+							packName = "${env.applicationName}/${env.applicationName}-${env.buildNumber}.zip"
+							int index = isPacFileName.toString().lastIndexOf('\\')
+							def onlyFolder = isPacFileName.substring(0, index)											
+							
+							try{
+								//Cria zip com a pasta de scripts gerada
+								zip zipFile: packName, archive: false, dir: onlyFolder								
+							 } catch (Exception e) {
+								echo "Erro ao compactar arquivo."								
+							}
+							
+							echo outputLineBreak
+                        }
+					}			
+				}			
+            }
+        }		
+		stage('Upload Artifactory') {
+            steps {
+                script {
+					dir ("${env.applicationName}"){
+                        try {
+                            //Cria configuração do artifactory (é necessário apenas porque o upload fará uma pergunta no console se não houver configuração, o que trava a esteira)
+                            bat "jf config add pine-artifactory --artifactory-url=${artifactoryUrl} --interactive=false"
+                        } catch (Exception e) {
+                            //Ignora erro caso já exista a configuração (melhorar validação conferindo o output, ou listando as configurações, mas por hora simplesmente ignorar o erro não deve dar problemas)
+                            echo "Configuração do artifactory já existe"
+                        }
+
+                        String packageUrl = "${artifactoryRepository}/${env.applicationName}/${env.applicationName}-${buildNumber}.zip"
+                        withCredentials([usernamePassword(credentialsId: artifactoryCredential, passwordVariable: 'credential_pwd', usernameVariable: 'credential_usr')]) {
+                            //Faz upload do zip no artifactory
+                            bat "jf rt u ${env.applicationName}-${env.buildNumber}.zip ${packageUrl} --insecure-tls --user=${credential_usr} --password=${credential_pwd} --url=${artifactoryUrl}"
+                        }
+
+                        echo "${outputLineBreak}\nPacote publicado em:\n${artifactoryUrl}/webapp/#/artifacts/browse/tree/General/${packageUrl}\n${outputLineBreak}"
+					}
+                }
+            }
+        }
+     }
+}

@@ -1,0 +1,128 @@
+pipeline {
+    agent { 
+        label 'jenkins-slave-maven'
+    }
+	parameters {
+	    string(defaultValue: "M123456", description: 'Numero de Gmud', name: 'Gmud') 
+		string(defaultValue: "da5f96b924fd3c6aa0af326fd16f55f3", description: 'ServiceID Number', name: 'ServiceID')
+    }
+	environment {
+	    SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+		gitURL = "https://tfs.pine.com/DefaultCollection/TI%20Pine/_git/Pine.infra.jenkins"
+		branchName = "master"
+		argFile = "arg.properties"
+		
+		// Environment Artifactory Variables
+		artifactPath = "ca-gateway"
+        downloadPath = "/opt/migration/"
+		publishprofile = "Exported"
+		
+	}
+    stages {
+        stage('Setup') {
+            steps {
+                script {	
+				
+					// Obtain an Artifactory server instance
+                    def server = Artifactory.server "artfactoryserver"
+                            
+					def buildInfo = Artifactory.newBuildInfo()
+                    // Set custom build name and number.
+                    buildInfo.setName "${Gmud}"
+                    buildInfo.setNumber "${env.BUILD_NUMBER}"
+							
+					// define the download spec
+					def downloadSpec = """{
+                        "files": [
+                        {
+                        "pattern": "${artifactPath}/config/${argFile}",
+                        "target": "${downloadPath}",
+						"regexp": "true"
+                        }
+                        ]
+                    }"""
+					
+					buildDownload = server.download spec: downloadSpec, buildInfo: buildInfo
+					buildDownload
+                }
+            }
+        }
+        stage('Export Policy Hml') {
+            steps {
+                script {
+					ExportService = sh (
+                         script: "/opt/migration/GatewayMigrationUtility.sh migrateOut --argFile /opt/migration/config/arg.properties --service ${ServiceID} --dest '${Gmud}-${ServiceID}.xml' --defaultAction NewOrUpdate --includeOnlyDependencies",
+                    returnStdout: true).trim()
+					
+					//getFolderIdDest = sh (
+                    //     script: "/opt/migration/GatewayMigrationUtility.sh list --argFile /opt/migration/config/arg.properties --type folder --filter name='${DestFolder}' | awk 'FNR==2 {print \$1}'",
+                    //returnStdout: true).trim()
+					
+					//ExportFolder = sh (
+                    //    script: "/opt/migration/GatewayMigrationUtility.sh migrateOut --argFile '/opt/migration/config/arg.properties' --folder ${getFolderId} --dest '${SrcFolder}.xml'",
+                    //returnStdout: true).trim()
+					
+					//MappingService = sh (
+                    //   script: "sed -i 's/68c56b3c1a4b7541eb9540e3b187fb9e/68c56b3c1a4b7541eb9540e3b187fca1/g' '${Gmud}-${ServiceID}.xml'",
+                    //returnStdout: true).trim()
+					
+					
+					
+					// Obtain an Artifactory server instance
+                    def server = Artifactory.server "artfactoryserver"
+					
+					def buildInfo = Artifactory.newBuildInfo()
+                    // Set custom build name and number.
+                    buildInfo.setName "${Gmud}"
+                    buildInfo.setNumber "${env.BUILD_NUMBER}"
+					
+					// define the upload spec
+                    def uploadSpec = """{
+                        "files": [
+                        {
+                           "pattern": "${Gmud}-${ServiceID}.xml",
+                           "regexp": "true",
+                           "target": "${artifactPath}/${Gmud}/",
+                           "flat": "false",
+                           "recursive": "true"
+                        }
+                        ]
+                    }"""
+					
+					def buildUpload = server.upload spec: uploadSpec, buildInfo: buildInfo
+					server.publishBuildInfo buildInfo
+                }
+            }
+        }
+		stage('Import Policy PRD') {
+            steps {
+                script {
+				
+                    // Obtain an Artifactory server instance
+                    def server = Artifactory.server "artfactoryserver"
+                            
+					def buildInfo = Artifactory.newBuildInfo()
+                    // Set custom build name and number.
+                    buildInfo.setName "${Gmud}"
+                    buildInfo.setNumber "${env.BUILD_NUMBER}"
+							
+					// define the download spec
+					def downloadSpec = """{
+                        "files": [
+                        {
+                        "pattern": "${artifactPath}/${Gmud}/${argFile}",
+                        "target": "${Gmud}/",
+						"regexp": "true"
+                        }
+                        ]
+                    }"""
+					
+					buildDownload = server.download spec: downloadSpec, buildInfo: buildInfo
+					buildDownload
+					
+					sh 'sh /opt/migration/GatewayMigrationUtility.sh migrateIn --argFile /opt/migration/config/arg.properties -b ${Gmud}-${ServiceID}.xml -r results.xml'
+                }
+            }
+        }
+    }
+}

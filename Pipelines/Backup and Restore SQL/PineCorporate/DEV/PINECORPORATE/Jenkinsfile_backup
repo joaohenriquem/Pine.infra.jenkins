@@ -1,0 +1,91 @@
+import groovy.json.JsonSlurper
+
+pipeline {
+         agent any
+            environment {
+					script = 'USE DBAPINE_CUBE SELECT * FROM dbo.dbuserinfo'
+					bdname = "DBAPINE_CUBE"
+				    bkpstatus = ''
+                    rebuild = 'null'
+                    userInput = 'null'
+                    goAhead1 = "null"			
+				    sqlcmd_path = "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\110\\Tools\\Binn"
+				    SQLCRED = credentials('sqlbkprestore')
+                    validabackup = 'null'
+                    validarestore = 'null'					
+					
+            }
+            stages {                  
+                stage('Execucao - do Script') {
+                    steps {
+						ws("${sqlcmd_path}"){
+                            script {
+							    if (changenumber != "") {
+									echo"${env.APIchangeAttachment}${changenumber}"
+									attachments = attachments.toUpperCase()
+									def textoconvertido = attachments.substring(attachments.indexOf('SELECT'), attachments.length())
+									echo "$subcategoria"
+									echo "$textoconvertido"
+                                    def consulta = powershell (
+                                    script: """
+									         SQLCMD -S pineprdsql06 -U ${SQLCRED_USR} -P ${SQLCRED_PSW} -d ${bdname} -W -Q "${textoconvertido}" -o "c:\\temp\\Consulta\\teste.csv"
+											 """,
+                                    returnStdout: true)
+									echo"Script Executado com sucesso."
+									
+
+                                }
+                            }
+                            
+                        }
+                    }
+                }
+				stage('Recebe ID da Mudança') {
+					steps {
+						script {
+							var1 = wrap([$class: 'ParentFolderBuildWrapper']) {
+								httpRequest customHeaders: [[maskValue: false, name: 'Authorization', value: "${env.APIJenkinsAutorization}"]], httpMode: 'GET', ignoreSslErrors: true,
+								responseHandle: 'NONE', url: "${env.APIchangeAttachment}${changenumber}"
+							}
+
+							echo "${var1}"
+
+							def json1 = new JsonSlurper().perseText(var1.content)
+							echo "${json1.message.keySet()}"
+
+						}
+					}
+				}
+
+                stage('Validando - Backup Restore') {
+                    steps {
+                        script {						
+								wrap([$class: 'ParentFolderBuildWrapper']) {
+									httpRequest customHeaders: [[maskValue: false, name: 'Authorization', value: "${env.APIAuthorization}"]], httpMode: 'POST', ignoreSslErrors: true, requestBody: '''[
+									{
+										"type": "attachment",
+										"invisibleForCaller": "false",
+										"fileName": "c:\\temp\\Consulta\\teste.csv"
+									}
+									]''',
+									responseHandle: 'NONE', url: "${env.APIchangeAttachment}${changenumber}/attachments"
+									
+									httpRequest customHeaders: [[maskValue: false, name: 'Authorization', value: "${env.APIAuthorization}"]], httpMode: 'PATCH', ignoreSslErrors: true, requestBody: '''[
+									{
+										"op": "replace",
+										"path": "/status",
+										"value": "Fechada"
+									},
+									{
+										"op": "add",
+										"path": "/progressTrail",
+										"value": "Consulta realizada com sucesso."
+									}
+									]''',
+									responseHandle: 'NONE', url: "${env.APIchangemgmt}${changenumber}"
+                        } 
+                    }
+                }
+            }					
+        }
+}          

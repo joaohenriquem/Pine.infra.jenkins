@@ -1,0 +1,118 @@
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, VersionBranch, OutputDir, artifactPath
+pipeline {
+    agent { 
+        label 'slave-dotnet-fortify'
+    }
+	environment {
+	    SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+	}
+    parameters {
+	    string(defaultValue: "", description: '', name: 'projectKey') 
+		string(defaultValue: "", description: '', name: 'requestby')
+		string(defaultValue: "", description: '', name: 'repositoryUri')
+		string(defaultValue: "", description: '', name: 'buildNumber')
+        string(defaultValue: "", description: '', name: 'branchName')
+		string(defaultValue: "", description: '', name: 'commit')
+		string(defaultValue: "", description: '', name: 'projectName')
+		string(defaultValue: "", description: '', name: 'imagename')
+        string(defaultValue: "", description: '', name: 'solutionFile')
+        string(defaultValue: "", description: '', name: 'buildFile')
+		string(defaultValue: "", description: '', name: 'buildname')
+        string(defaultValue: "enabled", description: '', name: 'sonarqubeStatus')
+        string(defaultValue: "enabled", description: '', name: 'fortifyStatus')
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+				    def gitURL = env.repositoryUri
+				    if (env.branchName.startsWith('release'))
+					{					
+						git branch: "Release/${env.branchName}", credentialsId: 'jenkins-slave-user', url: "${gitURL}"
+					}else
+					{					
+						git branch: "${env.branchName}", credentialsId: 'jenkins-slave-user', url: "${gitURL}"
+					}
+					if (fileExists ('version')){
+					    def versionFile = bat(script: 'type version', returnStdout: true).trim()
+						version = "${versionFile}${env.buildNumber}" 
+						echo "${versionFile}"
+					}
+					else
+					{
+						def defaultVersion = "1.0."
+						version = "${defaultVersion}${env.buildNumber}"
+					}
+					echo "Started job from TFS Build name: ${env.buildname}"
+                    echo "New version: ${version}"
+                }
+            }
+        }
+		stage('Code Check') {
+             parallel {
+                 stage('Sonarqube') {
+                    when {
+                        expression { env.sonarqubeStatus == 'enable' }
+                    }
+                    steps {
+                        script {
+						    def sonarScanner = tool 'msbuild-sonar-scanner'
+                            withSonarQubeEnv('sonarpine') {
+
+								def MSBuildPathVS = "${sonarScanner}SonarQube.Scanner.MSBuild.exe"
+								OutputDir="${projectKey}-publish"
+								
+								bat "${MSBuildPathVS} begin /key:\"${env.projectKey}\" /p:RestoreSources=\"http://artifactory.hml.pine.com/artifactory/api/nuget/pine-nuget\" /name:\"${env.projectKey}\" /version:\"${env.buildNumber}\" /d:sonar.host.url=\"${SONAR_HOST_URL}\" /d:sonar.sourceEncoding=UTF-8"
+								bat "${MSBuildPathVS} ${buildFile} /p:OutDir=${OutputDir} /p:PublishProfile=${projectKey} /p:Configuration=Release /p:Platform=\"Any CPU\" /p:ProductVersion=\"${env.buildNumber}\" /p:VisualStudioVersion=14.0 /T:Rebuild;Publish"
+								bat "${MSBuildPathVS} end "
+ 								
+								def sonarURL = "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${env.projectKey}"     
+                                def json = sonarURL.toURL().getText()
+                                def parsed = new groovy.json.JsonSlurper().parseText(json)
+                                
+                                while (parsed['projectStatus']['status'] == 'IN_PROGRESS') {
+                                    sleep (5)
+                                    echo "Checking Quality Gate"
+                                    json = sonarURL.toURL().getText()
+                                    parsed = new groovy.json.JsonSlurper().parseText(json)
+                                }
+                                
+                                if(parsed['projectStatus']['status'] == 'OK') {
+                                    echo "Sonar quality gateway is OK!"
+                                }  
+								else {
+                                    error "Sonar quality gateway is Failing!"
+                                }
+                            }
+                        }
+                    }
+                }
+		        stage('Fortify') {
+                    when {
+                            expression { env.fortifyStatus != 'skip' }
+                    }
+                    steps {
+                        script {
+		        			def FortifyHome = 'C:/Program Files/Fortify/Fortify_SCA_and_Apps_19.1.0/bin'
+		        			    if (env.branchName.startsWith('release'))
+		        			    {					
+		        				    VersionBranch="release"
+		        			    }
+		        				if (env.branchName.startsWith('desenvolvimento'))
+		        			    {					
+		        				    VersionBranch="desenvolvimento"
+		        			    }
+		        				bat "java -jar C:\\Jenkins\\Fortify\\dotnet\\fortify-api-client-0.0.1-jar-with-dependencies.jar create -n \"${env.projectKey.toLowerCase()}\" -v \"${VersionBranch}\""
+		        				bat "fortifyupdate -acceptSSLCertificate -acceptKey"
+		        				bat "sourceanalyzer  -b \"${env.buildname.toLowerCase()}\" -clean "
+		        				bat "sourceanalyzer  -b \"${env.buildname.toLowerCase()}\" \".\" "
+		        				bat "sourceanalyzer  -b \"${env.buildname.toLowerCase()}\" -scan -f \"results.fpr\" "
+		        				bat "fortifyclient  -url \"https://fortify.pine.com/ssc\" -authtoken \"f16410dc-4fc7-4b26-b7f9-93f4da46e07f\" uploadFPR -f \"results.fpr\" -project \"${env.projectKey.toLowerCase()}\" -version \"${VersionBranch}\" "
+                        }
+                    }
+                }
+			}
+		}
+		
+    }
+}

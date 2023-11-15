@@ -1,0 +1,115 @@
+import java.text.SimpleDateFormat
+
+def basePath, sqlpackagepath
+pipeline {
+    agent { 
+        label 'slave-aspnet-windows-01'
+    }
+	environment {
+	    SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+		SQLCRED = credentials('svcesteira')
+		pathAgente = "C:/jenkins/workspace/EntregaContinua/EntregaContinua-Banco-de-Dados/"
+		excludeObjectTypes = "Aggregates;ApplicationRoles;Assemblies;AsymmetricKeys;BrokerPriorities;Certificates;ColumnEncryptionKeys;ColumnMasterKeys;Contracts;DatabaseRoles;DatabaseTriggers;Defaults;ExtendedProperties;ExternalDataSources;ExternalFileFormats;ExternalTables;Filegroups;FileTables;FullTextCatalogs;FullTextStoplists;MessageTypes;PartitionFunctions;PartitionSchemes;Permissions;Queues;RemoteServiceBindings;RoleMembership;Rules;SearchPropertyLists;SecurityPolicies;Sequences;Services;Signatures;SymmetricKeys;Synonyms;ClrUserDefinedTypes;Users;XmlSchemaCollections;Audits;Credentials;CryptographicProviders;DatabaseAuditSpecifications;DatabaseScopedCredentials;Endpoints;ErrorMessages;EventNotifications;EventSessions;LinkedServerLogins;LinkedServers;Logins;Routes;ServerAuditSpecifications;ServerRoleMembership;ServerRoles;ServerTriggers"
+		includeObjectTypes = "ScalarValuedFunctions;Tables;TableValuedFunctions;Views;UserDefinedDataTypes;UserDefinedTableTypes;StoredProcedures"
+		repoName = "banco-de-dados-artifacts"
+		ARTIFACTORYURL = "https://artifactory.hml.pine.com/artifactory"
+		ARTIFACTORYUSER = "svc135"
+		ArtifactoryTokenCred = credentials('ArtifactoryToken')
+	}
+    parameters {
+		string(defaultValue: "", description: '', name: 'targetServerNameHml')
+		string(defaultValue: "", description: '', name: 'targetServerNameProd')
+		string(defaultValue: "", description: '', name: 'targetDatabaseName')
+		string(defaultValue: "", description: '', name: 'dacpacName')
+		string(defaultValue: "True", description: '', name: 'blockOnPossibleDataLoss')
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+				    echo "${env.workspace}"
+					
+				    def gitURL = env.repositoryUri
+				    if (env.branchName.startsWith('release'))
+					{					
+						git branch: "Release/${env.branchName}", credentialsId: 'jenkins-slave-user', url: "${gitURL}"
+					}
+					else
+					{					
+						git branch: "${env.branchName}", credentialsId: 'jenkins-slave-user', url: "${gitURL}"
+					}
+					
+					if (fileExists ('version')){
+					    versionFile = bat(script: 'type version', returnStdout: true).trim()
+						version = "${versionFile}${buildNumber}" 
+						echo "${versionFile}"
+					}
+					else
+					{
+						defaultVersion = "1.0."
+						version = "${defaultVersion}${buildNumber}"
+					}
+					echo "Started job from TFS Build name: ${env.buildname}"
+                    echo "New version: ${version}"
+                }
+            }
+        }
+		stage('Compliance') {
+			when {
+                expression { env.branchName.startsWith('Release') || env.branchName.startsWith('release') }
+            }
+			steps {
+                script {
+					String[] diffMaster = sh(returnStdout: true, script: "git rev-list --left-right --count origin/master...Release/${env.branchName}").trim()
+
+					def behind = ""
+					def ahead = ""
+
+					def isBehind = true
+
+					for(def i = 0; i < diffMaster.length; i++) {
+						//echo "diffMaster[${i}] = '${diffMaster[i]}' ou '${diffMaster[i].trim()}'"
+						if(diffMaster[i].trim().length() > 0) {
+							if(isBehind) {
+								behind += diffMaster[i]
+							}
+							else {
+								ahead += diffMaster[i]
+							}
+						} 
+						else {
+							isBehind = false
+						}
+					}
+
+					echo "${behind} behind and ${ahead} ahead of master"
+
+					if (behind != "0") {
+						currentBuild.result = 'ABORTED'
+                        error("ERROR: Branch [${env.branchName}] ${behind} behind and ${ahead} ahead of master")
+					}
+                }
+            }
+		}
+		stage('Base Config') {
+            steps {
+                script {
+					targetServerNameHml = "pinedevsql02"
+					targetServerNameProd = "pinedevsql02"
+					basePath = "${projectName}-${buildNumber}"
+					bat "mkdir ${basePath}"
+
+					sqlpackagepath = "C:/sqlpackage/sqlpackage.exe"
+				}
+			}
+		}
+		stage('Generate Package') {
+            steps {
+                script {		    
+					bat "msbuild ${env.solutionFile} -m -restore -verbosity:m /p:DeployOnBuild=true;Configuration=Release;OutputPath=${pathAgente+basePath} /t:Rebuild -warnAsMessage:SQL71558"
+                }
+            }
+        }
+		
+    }
+}

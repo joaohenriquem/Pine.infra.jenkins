@@ -1,0 +1,88 @@
+pipeline {
+         agent {label 'jenkins-slave-dotnet'}
+            environment {
+				    BDNameOrigem = "PINACESSO"
+				    BDNameDestino = "PINACESSO"
+					ServerOrigem = "PINEPRDSQL01"
+					ServerDestino = "PINE_SQL"
+				    bkpstatus = ''
+                    rebuild = 'null'
+                    userInput = 'null'
+                    goAhead1 = "null"			
+				    sqlcmd_path = "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\110\\Tools\\Binn"
+				    SQLCRED = credentials('sqlbkprestore')
+                    validabackup = 'null'
+                    validarestore = 'null'				
+            }
+            stages {                  
+                stage('Checkout Git') {
+                steps {
+                    git branch: pipelineParams.branch, credentialsId: 'TfsCredentials', url: pipelineParams.scmUrl
+                }
+                }
+                stage('Validando - Backup Restore') {
+                    steps {
+                        script {
+							//Valida backup
+							validabackup = backuprestore.contains('BACKUP DATABASE successfully')
+							
+							//Valida Restore
+							validarestore = backuprestore.contains('RESTORE DATABASE successfully')
+							if (validabackup == true){
+								echo "Backup Executado com sucesso"
+							}
+							else
+							{
+								echo "Backup apresentou falha"
+								currentBuild.result = 'ABORTED'
+							}
+							
+							if (validarestore == true){
+								echo "Restore Executado com sucesso"
+							}
+							else
+							{
+								echo "Restore apresentou falha"
+								currentBuild.result = 'ABORTED'
+							}
+										
+							if (validabackup == true && validarestore == true) {
+								wrap([$class: 'ParentFolderBuildWrapper']) {
+									httpRequest customHeaders: [[maskValue: false, name: 'Authorization', value: "${env.APIAuthorization}"]], httpMode: 'PATCH', ignoreSslErrors: true, requestBody: '''[
+									{
+										"op": "replace",
+										"path": "/status",
+										"value": "Fechada"
+									},
+									{
+										"op": "add",
+										"path": "/progressTrail",
+										"value": "Backup e Restore do banco de dados realizado com sucesso."
+									}
+									]''',
+									responseHandle: 'NONE', url: "${env.APIchangemgmt}${changenumber}"
+								}
+							}
+							else
+							{
+								wrap([$class: 'ParentFolderBuildWrapper']) {
+									httpRequest customHeaders: [[maskValue: false, name: 'Authorization', value: "${env.APIAuthorization}"]], httpMode: 'PATCH', ignoreSslErrors: true, requestBody: '''[
+									{
+										"op": "replace",
+										"path": "/status",
+										"value": "Iniciada"
+									},
+									{
+										"op": "add",
+										"path": "/progressTrail",
+										"value": "Ocorreu erro durante Backup Restore do banco de dados - Favor validar com a Infraestrutura"
+									}
+									]''',
+									responseHandle: 'NONE', url: "${env.APIchangemgmt}${changenumber}"
+								}
+							}
+                        } 
+                    }
+                }
+            }					
+        }          

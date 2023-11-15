@@ -1,0 +1,37 @@
+import java.text.SimpleDateFormat
+pipeline {
+         agent any
+            stages {
+
+				stage('Executando playbook') {
+                    steps {
+                        script {
+							def TriggerAnsible = build job: 'AnsibleFreeStyleDemo', 
+							wait: true, propagate: true,
+                            returnStdout: true
+                        }
+                    }
+                 }
+                stage('Encerrando Chamado') {
+                    steps {
+                        script {
+									wrap([$class: 'ParentFolderBuildWrapper']) {
+									httpRequest customHeaders: [[maskValue: false, name: 'Authorization', value: "${env.APIAuthorization}"]], httpMode: 'PATCH', ignoreSslErrors: true, requestBody: '''[
+									{
+										"op": "replace",
+										"path": "/status",
+										"value": "Fechada"
+									},
+									{
+										"op": "add",
+										"path": "/progressTrail",
+										"value": "Serviço realizado conforme solicitado."
+									}
+									]''',
+									responseHandle: 'NONE', url: "${env.APIchangemgmt}${changenumber}"
+									}
+								}
+							}
+                        } 
+                    }
+                }				

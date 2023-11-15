@@ -1,0 +1,8 @@
+jan 16, 2019 9:46:39 AM com.ca.gateway.rest.commandline.Main main
+INFORMAÇÕES: No command given. Printing available commands.
+jan 16, 2019 9:46:53 AM com.ca.gateway.rest.commandline.command.Command runCommand
+INFORMAÇÕES: Running Command: encodePassword
+jan 16, 2019 9:50:26 AM com.ca.gateway.rest.commandline.command.Command runCommand
+INFORMAÇÕES: Running Command: encodePassword
+jan 16, 2019 9:56:40 AM com.ca.gateway.rest.commandline.command.Command runCommand
+INFORMAÇÕES: Running Command: encodePassword

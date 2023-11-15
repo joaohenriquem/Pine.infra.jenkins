@@ -1,0 +1,60 @@
+pipeline {
+    agent any 
+        environment {
+            progress = credentials('progress')
+            serverHost = "w8pnhhcrk02"
+        }
+    stages {
+        stage('TESTE-1') { 
+            steps {
+				script {
+				    boolean backupexec = false;
+				    try {
+						winRMClient credentialsId: 'progress', hostName: "${serverHost}", winRMOperations: [invokeCommand ("d:\\CRKDB\\ARQS\\Restore_DB_PRD.bat")]
+						backupexec = true
+						currentBuild.result = 'SUCCESS'
+						echo "Restore realizado com sucesso"
+                    } catch (error) {
+						echo "Backup falhou"
+						currentBuild.result = 'FAILURE'
+					}				
+					if (backupexec == true) {
+						wrap([$class: 'ParentFolderBuildWrapper']) {
+							httpRequest customHeaders: [[maskValue: false, name: 'Authorization', value: "${env.APIAuthorization}"]], httpMode: 'PATCH', ignoreSslErrors: true, requestBody: '''[
+								{
+									"op": "replace",
+									"path": "/status",
+									"value": "Fechada"
+								},
+								{
+									"op": "add",
+									"path": "/progressTrail",
+									"value": "Backup e Restore do banco de dados realizado com sucesso."
+								}
+							]''',
+							responseHandle: 'NONE', url: "${env.APIchangemgmt}${changenumber}"
+						}
+					}
+					else
+					{
+						wrap([$class: 'ParentFolderBuildWrapper']) {
+							httpRequest customHeaders: [[maskValue: false, name: 'Authorization', value: "${env.APIAuthorization}"]], httpMode: 'PATCH', ignoreSslErrors: true, requestBody: '''[
+								{
+									"op": "replace",
+									"path": "/status",
+									"value": "Iniciada"
+								},
+								{
+									"op": "add",
+									"path": "/progressTrail",
+									"value": "Ocorreu erro durante Backup Restore do banco de dados - Favor validar com a Infraestrutura"
+								}
+							]''',
+							responseHandle: 'NONE', url: "${env.APIchangemgmt}${changenumber}"
+						}
+					}
+				}	
+            }
+        }
+    }
+}

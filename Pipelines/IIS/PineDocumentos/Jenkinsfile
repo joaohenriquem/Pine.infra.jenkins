@@ -1,0 +1,183 @@
+pipeline {
+    agent any
+        environment {
+            // Environment Git Variables
+			publishprofile = "Pine.Documentos.WebApi"
+			
+			gitRepo = "https://tfs.pine.com/DefaultCollection/TI%20Pine/_git/PineOnline.Documentos.WebAPI"
+			gitBranch = "Release"
+			MSBuildProjectFile = "PineDocumentos.sln"
+			
+			// Environment Artifactory Variables
+			artifactPath = "PineOnline.Documentos.WebApi.Dev"
+            workPath = "E:/JenkinsBuilds/${env.JOB_NAME}"
+            publishPath = "E:/JenkinsBuilds/${env.JOB_NAME}/publish"
+            archivePath = "${publishPath}/_PublishedWebsites/" 
+            
+			// Environment Build Variables
+            winsetcred = 'null'
+            SrvPassword = 'null'
+            sessionWin = 'null'
+            copyartifacts = 'null'
+			
+			// Environment Deploy Variables
+			serverHost = "pinedevweb01"
+            deployPath = "${archivePath}${publishprofile}"
+            applicationServerPath = "E:/sistemas/"
+			applicationFolderName = "deployteste"
+            filenameZip = "${publishprofile}.zip"
+            filePathZip = "${applicationServerPath}${applicationFolderName}/${filenameZip}"
+			
+			// Environment Sonarqube Variables
+            projectKey = "PineOnline.Documentos.WebApi-QA"
+            sonarurl = "http://sonarqube.hml.pine.com/api/qualitygates/project_status?projectKey=${projectKey}"
+        }
+        stages {
+            stage('Clone Source') {
+                steps {
+                    dir ("${workPath}"){
+                        script {  
+                            git branch: "${gitBranch}", credentialsId: 'tfsleandro123', url: "${gitRepo}"
+							
+							def overwriteSource1 = "${workPath}/${publishprofile}/Deploy/DEV/*"
+							def overwriteSource2 = "${workPath}/${publishprofile}/Deploy/"
+							
+							powershell "copy-item ${overwriteSource1} ${publishPath} -recurse -force" 
+							//powershell "remove-item ${overwriteSource2} -recurse -force" 
+                        }
+                    }
+                }
+            }
+//            stage('Build and Publish') {
+//                steps {
+//                    dir ("${workPath}"){
+//                        script {  
+//						    def sqScannerMsBuildHome = tool 'SonarScanner for MsBuild 4.4.0.15.04'
+//							def MsBuildHomeVS = tool 'MsBuildDefault'
+//							
+//							withSonarQubeEnv('sonarpine') {
+//							
+//                            def scannerMSBuildPath = "${sqScannerMsBuildHome}\\SonarScanner.MSBuild.exe"
+//							def MSBuildPathVS = "${MsBuildHomeVS}MSBuild.exe"
+//							
+//							bat "\"${scannerMSBuildPath}\" begin /key:${projectKey} /name:${projectKey} /version:${env.BUILD_NUMBER} /d:sonar.host.url=%SONAR_HOST_URL% /d:sonar.login=%SONAR_AUTH_TOKEN%"
+//							
+//							bat "\"${MSBuildPathVS}\" ${MSBuildProjectFile} /p:OutDir=${publishPath} /p:PublishProfile=${publishprofile} /p:Configuration=Release /p:Platform=\"Any CPU\" /p:ProductVersion=${env.BUILD_NUMBER} /p:VisualStudioVersion=14.0 /T:Rebuild;Publish"
+//							
+//							bat '"'+ scannerMSBuildPath +'" end /d:sonar.login=%SONAR_AUTH_TOKEN%"'
+//                        }
+//                    }
+//                }
+//              }
+//			}
+			
+			stage('Fortify') {
+                steps {
+                    dir ("${workPath}"){
+                        script {  
+							def MsBuildHomeVS = tool 'MsBuildDefault'
+							def MSBuildPathVS = "${MsBuildHomeVS}MSBuild.exe"
+							def FortifyHome = 'E:/FortiFy/Fortify_SCA_and_Apps_18.20/bin/'
+									
+							bat "\"${FortifyHome}sourceanalyzer.exe\"  -b \"$JOB_NAME\" \"${MSBuildPathVS}\" \"${MSBuildProjectFile}\" "
+							bat "\"${FortifyHome}sourceanalyzer.exe\"  -b \"$JOB_NAME\" -scan -Xmx4608M -f \"results.fpr\" "
+							bat "\"${FortifyHome}fortifyclient.bat\"  -url \"http://172.16.47.117:8080/ssc\" -authtoken \"7ce15431-e2da-4ea2-a199-6f7e85c15006\" uploadFPR -f \"results.fpr\" -project \"Pine Documentos\" -version \"1.0\" "
+                        
+						}
+                    }
+                }
+            }
+			
+			stage('QA') {
+                steps {
+                    script {
+						def json = sonarurl.toURL().getText() 
+                        def parsed = new groovy.json.JsonSlurper().parseText(json)
+                            
+                        while (parsed['projectStatus']['status'] == 'IN_PROGRESS')
+                        {
+                            sleep (5)
+                        }
+                            
+                        if(parsed['projectStatus']['status'] == 'OK'){
+                            echo "sonar quality gateway is OK!"
+                        }
+                        else
+                        {
+                            echo "sonar quality gateway is Failing!"
+                        }
+                    }
+                }
+            }
+            stage('Upload Artifacts') {
+                steps {
+                    script{
+                        dir ("${archivePath}"){
+                            // Obtain an Artifactory server instance
+                            def server = Artifactory.server "artfactoryserver"
+                            
+							def buildInfo = Artifactory.newBuildInfo()
+                            // Set custom build name and number.
+                            buildInfo.setName "${publishprofile}"
+                            buildInfo.setNumber "${env.BUILD_NUMBER}"
+							
+							
+                            // define the upload spec
+                            def uploadSpec = """{
+                              "files": [
+                                {
+                                  "pattern": "${publishprofile}/",
+                                  "regexp": "true",
+                                  "target": "${artifactPath}/",
+                                  "flat": "false",
+                                  "recursive": "true"
+                                  
+                                }
+                             ]
+                            }"""
+                            
+                            def downloadSpec = """{
+                              "files": [
+                                {
+                                  "pattern": "${artifactPath}/${publishprofile}/",
+                                  "regexp": "true",
+                                  "target": "${publishPath}/",
+                                  "flat": "false",
+                                  "recursive": "true"
+                                  
+                                }
+                             ]
+                            }"""
+                            
+                            def buildDownload = server.download spec: downloadSpec, buildInfo: buildInfo
+                            
+                            // Upload to Artifactory.
+                            def buildUpload = server.upload spec: uploadSpec, buildInfo: buildInfo
+                            
+                            // Merge the upload and download build-info objects.
+                            buildUpload.append buildDownload
+                        
+                            // Publish the build to Artifactory
+                            server.publishBuildInfo buildInfo
+                        }
+                    }
+                }
+            }
+            stage('Deploy') {
+                steps {
+                    dir ("${archivePath}"){
+                        zip dir: "${deployPath}", glob: '', zipFile: "${filenameZip}"
+                        winRMClient	credentialsId: 'remotecreds', 
+                        hostName: "${serverHost}", 
+                        winRMOperations: [sendFile(source: "${archivePath}/${filenameZip}", destination: "${applicationServerPath}${applicationFolderName}"),
+                        invokeCommand ("Expand-Archive -Path ${filePathZip} -DestinationPath ${applicationServerPath}${applicationFolderName} -Force"),
+                        invokeCommand ("Remove-item ${filePathZip} -ErrorAction SilentlyContinue -Confirm:\$false -Force")]
+                        deleteDir()
+                    }
+                    dir ("${workPath}"){
+                        deleteDir()
+                    }
+                }    
+            }   
+        }
+    }

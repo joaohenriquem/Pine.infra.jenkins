@@ -1,0 +1,43 @@
+pipeline {
+    agent any
+        environment {
+            // Environment Git Variables
+			publishprofile = "Pine.DominiosCorporativos.WebApi"
+			gitRepo = "https://tfs.pine.com/DefaultCollection/TI%20Pine/_git/Digital.PineOnline"
+			gitBranch = "master"
+			
+			// Environment Artifactory Variables
+            workPath = "E:/JenkinsBuilds/${env.JOB_NAME}/src/Android/PineOnline"
+
+        }
+        stages {
+            stage('Clone Source') {
+                steps {
+                    dir ("${workPath}"){
+                        script {  
+                            git branch: "${gitBranch}", credentialsId: 'jenkinstotfs', url: "${gitRepo}"
+                        }
+                    }
+                }
+            }
+			
+			stage('Fortify') {
+                steps {
+                    dir ("${workPath}"){
+                        script {  
+							def GradleHome = tool 'Gradle3.1'
+							def GradlePath = "${GradleHome}\\bin\\gradle"
+							def FortifyHome = 'E:/FortiFy/Fortify_SCA_and_Apps_18.20/bin/'
+							
+							bat "\"${FortifyHome}sourceanalyzer.exe\"  -b \"$JOB_NAME\" -clean "	
+							bat "\"${FortifyHome}sourceanalyzer.exe\"  -b \"$JOB_NAME\" \"${GradlePath}\" "
+							//bat "\"${FortifyHome}sourceanalyzer.exe\"  -b \"$JOB_NAME\" -scan -Xmx8G -f \"results.fpr\" "
+							//bat "\"${FortifyHome}fortifyclient.bat\"  -url \"http://172.16.47.117:8080/ssc\" -authtoken \"7ce15431-e2da-4ea2-a199-6f7e85c15006\" uploadFPR -f \"results.fpr\" -project \"PineDominiosCorporativosCore\" -version \"1.0\" "
+                        
+						}
+                    }
+                }
+            }
+			
+        }
+    }

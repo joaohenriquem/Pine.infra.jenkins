@@ -1,0 +1,49 @@
+pipeline {
+         agent any
+            stages {                  
+                stage('Execução - Criação Repository AnsibleTower') {
+                    steps {
+                        ansibleTower(
+                        towerServer: 'Ansible Tower',
+                        towerCredentialsId: '',
+                        templateType: 'job',
+                        jobTemplate: 'VISUAL SVN SERVER - CREATE REPOSITORY AUTOMATION',
+                        inventory: '',
+                        jobTags: '',
+                        skipJobTags: '',
+                        limit: '',
+                        removeColor: false,
+                        verbose: true,
+                        credential: '',
+                        extraVars: '''---
+                nomerepositorio: "${nomerepositorio}"
+                ''',
+                        async: false
+        )
+
+        }
+
+                }
+                stage('Validando - Criacao') {
+                    steps {
+                        script {
+								wrap([$class: 'ParentFolderBuildWrapper']) {
+									httpRequest customHeaders: [[maskValue: false, name: 'Authorization', value: "${env.APIAuthorization}"]], httpMode: 'PATCH', ignoreSslErrors: true, requestBody: '''[
+									{
+										"op": "replace",
+										"path": "/status",
+										"value": "Fechada"
+									},
+									{
+										"op": "add",
+										"path": "/progressTrail",
+										"value": "Repositorio no Visual SVN Server criado com Sucesso."
+									}
+									]''',
+									responseHandle: 'NONE', url: "${env.APIchangemgmt}${changenumber}"
+								}
+							}
+                        } 
+                    }
+                }
+            }					          

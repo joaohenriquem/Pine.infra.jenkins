@@ -1,0 +1,244 @@
+import java.text.SimpleDateFormat
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, VersionBranch, version, StartBuild, StartBuildOutput, builds, buildOutput, sonarqualityresult, passarSonar
+pipeline {
+	agent {
+		label 'jenkins-slave-node'
+	}
+	environment {
+		SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+		repoName = "npm-artifacts"
+		ARTIFACTORYURL = "https://artifactory.hml.pine.com/artifactory"
+		ARTIFACTORYUSER = "svc135"
+		ArtifactoryTokenCred = credentials('ArtifactoryToken')
+	}
+	parameters {
+		string(defaultValue: "", description: '', name: 'projectKey') 
+		string(defaultValue: "", description: '', name: 'requestby')
+		string(defaultValue: "", description: '', name: 'repositoryUri')
+		string(defaultValue: "", description: '', name: 'buildNumber')
+		string(defaultValue: "", description: '', name: 'buildname')
+		string(defaultValue: "", description: '', name: 'branchName')
+		string(defaultValue: "", description: '', name: 'commit')
+		string(defaultValue: "", description: '', name: 'projectName')
+		string(defaultValue: "", description: '', name: 'imagename')
+		string(defaultValue: "", description: '', name: 'folderSource')
+		string(defaultValue: "enabled", description: '', name: 'sonarqubeStatus')
+		string(defaultValue: "enabled", description: '', name: 'fortifyStatus')
+		string(defaultValue: "", description: '', name: 'sonar_dt_limet_disable')
+	}
+	stages {
+		stage('Checkout') {
+			steps {
+				script {
+
+					// cria o arquivo entrypoint global
+								sh "echo '#!/bin/sh'>./entrypointglobal.sh"
+								sh "echo 'for tbl in \$(printenv | grep PINE_ )'>>./entrypointglobal.sh"
+								sh "echo 'do'>>./entrypointglobal.sh"
+								sh """echo 'A="\$(cut -d'=' -f1 <<<\$tbl)"'>>./entrypointglobal.sh"""
+								sh """echo 'B="\$(cut -d'=' -f2 <<<\$tbl)"'>>./entrypointglobal.sh"""
+								sh """echo 'sed -i "s/{{\$A}}/\$B/g" *.js'>>./entrypointglobal.sh"""
+								sh "echo 'done'>>./entrypointglobal.sh"
+								sh "echo 'exec ./entrypoint.sh'>>./entrypointglobal.sh"
+								sh "cat ./entrypointglobal.sh"
+
+					openshift.withCluster() {
+						openshift.withProject( "cicd" ) {
+							BC_JobName = "ci-${env.buildname.toLowerCase()}"
+							BC_JobName_Dev = "${BC_JobName}-dev"
+							BC_JobName_Hml = "${BC_JobName}-hml"
+						}
+					}
+					def defaultVersion = "1."
+					version = "${defaultVersion}${env.buildNumber}"
+					versionBuild = "${version}"
+					echo "${version}"
+
+					echo "Started job from TFS Build name: ${env.buildname}"
+					echo "New version: ${version}"
+
+					//Replace https to ssh
+					def gitURL = env.repositoryUri.replace('https', 'ssh')
+					def branchNameLocal = env.branchName.toLowerCase()
+					
+					//Branch Name
+					if (branchNameLocal.startsWith('desenvolvimento')) {
+						git branch: "${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					} else if (branchNameLocal.startsWith('release')) {
+						git branch: "Release/${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					} else if (branchNameLocal.startsWith('hotfix')) {
+						echo "Branch: Hotfix/${env.branchName}"
+						git branch: "Hotfix/${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					}
+				}
+			}
+		}
+		stage('Code Check') {
+			parallel {
+				stage('Sonarqube') {
+					stages{
+						stage('Build Artfact') {
+							steps {
+								script {
+									dir ("${env.folderSource}"){
+										
+									
+										
+										//Remove package-lock.json file if exist
+										echo "Build Step -- Remove package-lock.json file if exist"
+										if (fileExists ("package-lock.json")){
+											sh """#!/bin/sh -e
+													rm -f package-lock.json
+													"""
+										}
+										
+										//Replace Value in the package-lock.json if file exist
+										if (fileExists ("package.json")){
+											sh """#!/bin/sh -e
+												sed -i 's#"nuxt": "^2.0.0"#"nuxt": "2.9.0"#g' package.json
+													
+													"""
+										}										
+						
+										// Set off SSL validate				
+										sh """#!/bin/sh -e
+												npm set strict-ssl false
+										"""
+										
+										// Set progress bar disable				
+										sh """#!/bin/sh -e
+												npm set progress=false
+												npm cache clean --force
+										"""
+										
+										// Change the npm registry mirror if provided
+										echo "Build Step -- Setting default regisry for NPM"
+										sh """#!/bin/sh -e
+										        npm config set registry https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/
+												npm i npmrc -g
+												npmrc -c pine
+												npm config set registry https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/
+												npm config set puppeteer_download_host=https://artifactory.hml.pine.com/artifactory/pine-github
+												npm config delete http-proxy
+												npm config delete https-proxy
+												npm config rm proxy
+												npm config rm https-proxy
+												set HTTP_PROXY=null
+												set HTTPS_PROXY=null
+												"""
+										
+										// Change the DEV_MODE to false
+										sh """#!/bin/sh -e
+												export DEV_MODE=false
+												"""
+										
+										// Set NODE_ENV to development
+										echo "Build Step -- Setting NODE_ENV"
+										sh """#!/bin/sh -e
+												export NODE_ENV=development
+												"""
+										
+																				
+										// Installing Chromedriver & Puppeter
+										
+										// if (packagelines.contains('prerender-spa-plugin')){
+										//     echo "Build Step -- Npm install Puppeter"
+										// 	sh """
+										// 		npm cache clean --force
+										// 		npm install puppeteer@2.0.0 --registry=https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/
+										// 		npm install chromedriver --chromedriver_cdnurl=https://artifactory.hml.pine.com/artifactory/pine-github
+										// 		npm install html-webpack-plugin --registry=https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/
+										// 		npm install prerender-loader --registry=https://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/ --force
+										// 		"""
+										// }
+										
+										//Remove Chromedriver
+										
+									
+
+										// configura as dependencias para pactoes locais do pine
+										sh "npm config set @pine:registry http://artifactory.hml.pine.com/artifactory/api/npm/npm-private/"
+									}
+								}
+							}
+						}
+						stage('Check Code'){
+							when {
+								expression { env.sonarqubeStatus == 'enabled' }
+							}
+							steps {
+								script {
+									def sonarScanner = tool 'nodejs-sonar-scanner42'
+									withSonarQubeEnv('sonarpine') {
+										def sonarScannerBin = "${sonarScanner}/sonar-scanner-4.2.0.1873-linux/bin/sonar-scanner"
+										sh "rm -f package-lock.json"
+										sh "npm set strict-ssl false"
+										sh "npm config set registry http://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/"
+										sh """
+										export SONAR_SCANNER_OPTS="-Xmx4096m"
+										export JAVA_TOOL_OPTIONS="-XX:+UnlockExperimentalVMOptions"
+										${sonarScannerBin} -Dsonar.projectKey=${env.projectKey} -Dsonar.sources=. -Dsonar.exclusions=node_modules/** -Dsonar.exclusions=prerendered/** -Dsonar.host.url=\"${SONAR_HOST_URL}\" -Dsonar.sourceEncoding=\"UTF-8\" 
+										"""
+										
+										//Sonarqube Sempre true
+										passarSonar = true 
+
+										if(sonar_dt_limet_disable != null && sonar_dt_limet_disable != ""){
+
+											def format = new SimpleDateFormat("dd-MM-yyyy") 
+											def dateDisable = format.parse(sonar_dt_limet_disable ) 
+
+											def date = new Date()
+											if(dateDisable > date ){
+												passarSonar = false
+											}
+										}
+									}
+									
+									//Check quality gate Result
+									def qualityGateResult = null
+									timeout(time: 30, unit: 'MINUTES') {
+										qualityGateResult = waitForQualityGate()
+									}	
+										
+									if (passarSonar) {
+										if(qualityGateResult.status == 'OK') {
+											echo "Sonar quality gateway - Projeto passou no teste de qualidade!"
+											sonarqualityresult = "ok"
+										} else {
+											error "Sonar quality gateway - Projeto nao passou no teste de qualidade do Sonarqube!"
+											sonarqualityresult = "false"
+										}
+									} else {
+										echo "Sonar quality gateway - Codigo foi analisado pelo Sonarqube porem sera ignorado o resultado ate ${sonar_dt_limet_disable}"
+									}
+								}
+							}
+						}
+					}
+				}
+				// stage('Fortify') {
+                //     when {
+                //         expression { return env.fortifyStatus == 'enabled-force-disable' }
+                //     }
+                //     steps {
+				// 		script {
+				// 			def buildFortify = build job: 'EntregaContinua-Nodejs-Nginx-Fortify', 
+				// 			parameters: [
+				// 				[$class: 'StringParameterValue', name: 'projectKey', value: "${projectKey}"], 
+				// 				[$class: 'StringParameterValue', name: 'requestby', value: "${requestby}"],
+				// 				[$class: 'StringParameterValue', name: 'repositoryUri', value: "${repositoryUri}"],
+				// 				[$class: 'StringParameterValue', name: 'buildNumber', value: "${buildNumber}"],
+				// 				[$class: 'StringParameterValue', name: 'branchName', value: "${branchName}"],
+				// 				[$class: 'StringParameterValue', name: 'commit', value: "${commit}"],
+				// 				[$class: 'StringParameterValue', name: 'projectName', value: "${projectName}"],
+				// 				[$class: 'StringParameterValue', name: 'buildname', value: "${buildname}"],
+				// 				[$class: 'StringParameterValue', name: 'folderSource', value: "${folderSource}"]
+				// 			], wait: true, propagate: true
+				// 		}
+                //     }
+                //  }
+			}
+		}						
+	}
+}

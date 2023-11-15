@@ -1,0 +1,263 @@
+import java.text.SimpleDateFormat
+import groovy.json.JsonSlurper
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, version, versionFile, versionBuild, passarSonar, currentversion
+pipeline {
+    agent { 
+        label 'jenkins-slave-dotnet-60'
+    }
+	environment {
+	    SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+		repoName = "npm-jobs"
+		ARTIFACTORYURL = "https://artifactory.hml.pine.com/artifactory"
+		ARTIFACTORYUSER = "svc135"
+		ArtifactoryTokenCred = credentials('ArtifactoryToken')
+		version = ''
+	}
+    parameters {
+	    string(defaultValue: "", description: '', name: 'projectKey') 
+		string(defaultValue: "", description: '', name: 'requestby')
+		string(defaultValue: "", description: '', name: 'repositoryUri')
+		string(defaultValue: "", description: '', name: 'buildNumber')
+        string(defaultValue: "", description: '', name: 'branchName')
+        string(defaultValue: "", description: '', name: 'projectName')
+		string(defaultValue: "", description: '', name: 'commit')
+        string(defaultValue: "", description: '', name: 'solutionFile')
+        string(defaultValue: "", description: '', name: 'buildFile')
+		string(defaultValue: "", description: '', name: 'buildname')
+		string(defaultValue: "", description: '', name: 'sonar_dt_limet_disable')
+		string(defaultValue: "netcoreapp3.1", description: '', name: 'dotNetVersion')
+    }
+    stages {
+		stage('Checkout') {
+            steps {
+                script {		        
+                    openshift.withCluster() {
+					    openshift.withProject( "cicd" ) {
+						    BC_JobName = "ci-${env.buildname.toLowerCase()}"
+							BC_JobName_Dev = "${BC_JobName}-dev"
+							BC_JobName_Hml = "${BC_JobName}-hml"
+							
+							if (openshift.selector("bc/${BC_JobName_Dev}").exists()) {
+					            def currentsource = openshift.selector("bc","${BC_JobName_Dev}").object().spec.source.git.ref
+					            def newsource = "${env.commit}"							
+					            if (currentsource == newsource){
+						            buildPatch = "nopatch"
+					            }
+								
+								currentversion = openshift.selector("bc","${BC_JobName_Dev}").object().spec.strategy.sourceStrategy.from.name
+								if (currentversion != "dotnet:3.1" ){
+									openshift.patch("bc/${BC_JobName_Dev}",'\'{"spec":{"strategy":{"sourceStrategy":{"from":{"name":"'+"dotnet:3.1"+'"}}}}}\'')
+								}
+							}
+							if (openshift.selector("bc/${BC_JobName_Hml}").exists()) {
+					            def currentsource = openshift.selector("bc","${BC_JobName_Hml}").object().spec.source.git.ref
+					            def newsource = "${env.commit}"							
+					            if (currentsource == newsource){
+						            buildPatch = "nopatch"
+					            }
+								
+								currentversion = openshift.selector("bc","${BC_JobName_Hml}").object().spec.strategy.sourceStrategy.from.name
+								if (currentversion != "dotnet:3.1"){
+									openshift.patch("bc/${BC_JobName_Hml}",'\'{"spec":{"strategy":{"sourceStrategy":{"from":{"name":"'+"dotnet:3.1"+'"}}}}}\'')
+								}
+							}
+						}
+					}
+					def gitURL = env.repositoryUri.replace('https', 'ssh')
+					if (env.branchName.startsWith('release'))
+					{					
+						git branch: "Release/${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					}else
+					{					
+						git branch: "${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					}
+                }
+            }
+        }
+        stage('Setup') {
+            steps {
+                script {
+				    if (fileExists ('version')){
+                        versionFile = sh(script: 'cat version', returnStdout: true).trim()
+                        version = "${versionFile}${env.buildNumber}"
+						versionBuild = "${versionFile.replace("-", "")}"
+						echo "${versionFile}"
+					}
+					else
+					{
+						def defaultVersion = "1.0."
+						version = "${defaultVersion}${env.buildNumber}"
+						versionBuild = "${defaultVersion}"
+					}
+
+                    echo "Started job from TFS Build name: ${env.buildname}" 
+                    echo "New version: ${version}"
+                }
+            }
+        }
+		stage('Tests') {
+			steps {
+				script {
+					try {
+						sh "dotnet restore ${env.solutionFile} -s http://artifactory.hml.pine.com:8081/artifactory/api/nuget/pine-nuget" 
+						sh "dotnet test ${env.solutionFile} --logger 'console;verbosity=detailed' --collect:'XPlat Code Coverage' -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover "	
+					} catch (Exception e) {
+						echo "Stage failed, but we still continue"
+					}					
+				}
+				catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+					//suprimir erro dos testes
+				}
+			}
+		}
+        stage('Code Check') {
+             parallel {
+                 stage('Sonarqube') {
+                    when {
+                        expression { env.sonarqubeStatus != 'skip' }
+                    }
+                    steps {
+                        script {
+						    def sonarScanner = tool 'dotnet-sonar-scanner-31'
+                            withSonarQubeEnv('sonarpine') {
+								
+								//Code Check Sonarqube
+								def sonarScannerBin = "${sonarScanner}/SonarScanner.MSBuild.dll"
+							    sh "dotnet restore ${env.solutionFile} -s https://artifactory.hml.pine.com/artifactory/api/nuget/pine-nuget"
+								sh "dotnet ${sonarScannerBin} begin /k:\"${env.projectKey}\" /n:\"${env.projectKey}\" /v:\"${env.buildNumber}\" /d:sonar.host.url=\"${SONAR_HOST_URL}\" /d:sonar.sourceEncoding=UTF-8 /d:sonar.cs.opencover.reportsPaths=/**/*.xml"
+								sh "dotnet build ${env.solutionFile} --configuration Release --source https://artifactory.hml.pine.com/artifactory/api/nuget/pine-nuget"
+								sh "dotnet ${sonarScannerBin} end"
+								
+								//Sonarqube Sempre true
+								passarSonar = true 
+
+								if(sonar_dt_limet_disable != null && sonar_dt_limet_disable != ""){
+
+									def format = new SimpleDateFormat("dd-MM-yyyy") 
+									def dateDisable = format.parse(sonar_dt_limet_disable ) 
+
+									def date = new Date()
+									if(dateDisable > date ){
+										passarSonar = false
+									}
+								}
+							}
+							
+							//Check quality gate Result
+							def qualityGateResult = null
+							timeout(time: 30, unit: 'MINUTES') {
+								qualityGateResult = waitForQualityGate()
+							}
+							
+							if(passarSonar){
+								if(qualityGateResult.status == 'OK') {
+									echo "Sonar quality gateway - Projeto passou no teste de qualidade!"
+								} 
+								else {
+									error "Sonar quality gateway - Projeto nao passou no teste de qualidade do Sonarqube!"
+								}
+							}
+							
+							if(!passarSonar){
+								echo "Sonar quality gateway - Codigo foi analisado pelo Sonarqube porem sera ignorado o resultado ate ${sonar_dt_limet_disable}"
+							}
+                        }
+                    }
+                }
+
+				stage('Fortify') {
+                    when {
+                        //expression { env.fortify != 'skip' }
+                        expression { return false }
+                    }
+                    steps {
+                        script {
+							def buildFortify = build job: 'EntregaContinua-Dotnet-Fortify', 
+								parameters: [
+								[$class: 'StringParameterValue', name: 'projectKey', value: "${projectKey}"], 
+								[$class: 'StringParameterValue', name: 'requestby', value: "${requestby}"],
+								[$class: 'StringParameterValue', name: 'repositoryUri', value: "${repositoryUri}"],
+								[$class: 'StringParameterValue', name: 'buildNumber', value: "${buildNumber}"],
+								[$class: 'StringParameterValue', name: 'branchName', value: "${branchName}"],
+								[$class: 'StringParameterValue', name: 'buildname', value: "${buildname}"],
+								[$class: 'StringParameterValue', name: 'solutionFile', value: "${solutionFile}"]
+								], wait: true, propagate: true
+                        }
+                    }
+                 }
+           
+             }
+        }
+		stage('Publish Job') {
+			steps {
+				script {
+				    sh """ dotnet publish "${env.buildFile}" --configuration Release --framework ${env.dotNetVersion}  --output "${env.projectKey}/publish" --self-contained true --runtime win-x64 """
+					zip zipFile: "${env.projectKey}/${env.projectKey}-${buildNumber}.zip", archive: false, dir: "${env.projectKey}/publish"
+				}
+			}
+		}
+		stage('Upload Artifactory') {
+			steps {
+				script {
+				    dir ("${env.projectKey}"){
+						if (fileExists ("${env.projectKey}-${buildNumber}.zip")){
+
+							// Obtain an Artifactory server instance
+							def server = Artifactory.server "artfactoryserver"
+							
+							def buildInfo = Artifactory.newBuildInfo()
+							// Set custom build name and number.
+							buildInfo.setName "${env.projectKey}"
+							buildInfo.setNumber "${buildNumber}"
+							
+							// define the upload spec
+							def uploadSpec = """{
+							"files": [
+								{
+								"pattern": "${env.projectKey}-${buildNumber}.zip",
+								"regexp": "true",
+								"target": "${repoName}/${env.projectKey}/",
+								"flat": "false",
+								"recursive": "true"
+								}
+							]
+							}"""
+							
+							// Upload to Artifactory.
+							def buildUpload = server.upload spec: uploadSpec, buildInfo: buildInfo
+							
+							// Publish the build to Artifactory
+							server.publishBuildInfo buildInfo
+						}
+					}
+				}
+			}
+		}
+      stage('Deploy JOB LightBM') {
+                    steps {
+                    ansibleTower(
+                        towerServer: 'Ansible Tower',
+                        towerCredentialsId: '',
+                        templateType: 'job',
+                        jobTemplate: 'Esteira-Jobs',
+                        inventory: '',
+                        jobTags: '',
+                        skipJobTags: '',
+                        limit: '',
+                        removeColor: false,
+                        verbose: true,
+                        credential: '',
+                        extraVars: '''---
+                pastaprojeto: "${projectName}"
+                pastaaplicacao: "${projectKey}"
+                reponame: "${repoName}"
+                versionpacote: "${buildNumber}"
+                ''',
+                        async: false
+        )
+
+        }
+
+        }
+    }
+}

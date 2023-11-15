@@ -1,0 +1,414 @@
+def logonclusterhml, logonclusterprod, srccreds_token, destcreds_token, imagehml, imageprd, srccreds, destcreds, dcPrd, dcHml, svcHml, EnvApply, dcEnvSelect
+def dcSelectHml, dcImageStreamHml, dcImageIDHml, dcSelectPrd, dcImageStreamPrd, dcImageIDPrd, appNamespace, goAhead, goAheadEnv, dcVersionHml
+pipeline{
+    agent {label 'jenkins-slave-image-mgmt'}
+    parameters{
+        string(name: 'TagProducao', defaultValue: "", description: "Informe a Tag de HML")
+        string(name: 'Gmud', defaultValue: "", description: "Informe o numero da Gmud")
+    }
+    environment {
+        clusterhml = 'https://lxcpnhhopen01.pine.com.br:8443'
+        clusterprod = 'https://openshiftmasters.pine.com.br:8443'
+        registryHml = 'registry.hml.pine.com'
+        registryPrd = 'openregistry.pine.com'
+        OpenshiftCRED = credentials('openshifthmltoprd')
+		
+		appName = "${env.JOB_NAME}".split('/').last()
+		copyPrd = "false"
+		deployedPrd = "null"
+		aprovacao = "null"
+		PrdPublic = "false"
+		SVC_port_numberHml = "false"
+    }
+    stages {
+        stage('Check version Hml') {
+            steps {
+                script {
+	        	    wrap([$class: 'ParentFolderBuildWrapper']) {
+					    appNamespace = "${env.namespace}"
+				    }
+			        openshift.withCluster('Homologacao') {
+                        openshift.withProject( "${appNamespace}" ) {
+                            if (openshift.selector( "dc/${appName}" ).exists()){
+                                if (Gmud != ""){
+                                    //Select Deployment and Version
+                                    dcSelectHml = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.from.name
+							        dcVersionHml = "${dcSelectHml}".split(':').last()
+							        dcVersionHml = dcVersionHml.substring(0,dcVersionHml.length() - 1)
+									
+							        //Select ImageStream Name
+							        dcImageStreamHml = "${dcSelectHml}".split(':').first()
+							        dcImageStreamHml = dcImageStreamHml.substring(1,dcImageStreamHml.length())
+								
+							        //Select Current Image SHA
+							        dcImageIDHml = openshift.selector('istag',"${dcImageStreamHml}:${TagProducao}").object().image.dockerImageReference
+							        dcImageIDHml = "${dcImageIDHml}".split('@').last()
+							        dcImageIDHml = dcImageIDHml.substring(0,dcImageIDHml.length() - 1)
+								
+							        SVC_port_numberHml = openshift.selector("svc","${appName}").object().spec.ports.port
+                                }
+                                else{
+                                    currentBuild.result = 'ABORTED'
+							        error('Necessario informar numero da Gmud')
+                                }            
+                            }
+                            else{
+                                currentBuild.result = 'ABORTED'
+						        error('A aplicacao ${appName} nao foi encontrada em Hml')
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stage('Check version PRD') {
+            steps {
+                script {
+                    openshift.withCluster('Producao') {
+                        openshift.withProject( "${appNamespace}" ) {
+                            if (openshift.selector( "dc/${appName}" ).exists() ){
+                                //Select Deployment and Version
+                                dcSelectPrd = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.from.name
+							    dcVersionPrd = "${dcSelectPrd}".split(':').last()
+							    dcVersionPrd = dcVersionPrd.substring(0,dcVersionPrd.length() - 1)
+
+							    //Select ImageStream Name
+							    dcImageStreamPrd = "${dcSelectPrd}".split(':').first()
+							    dcImageStreamPrd = dcImageStreamPrd.substring(1,dcImageStreamPrd.length())
+								echo "imagestream PRD ${dcImageStreamPrd}"
+								
+							    //Select Current Image SHA
+							    dcImageIDPrd = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.lastTriggeredImage
+							    dcImageIDPrd = "${dcImageIDPrd}".split('@').last()
+							    dcImageIDPrd = dcImageIDPrd.substring(0,dcImageIDPrd.length() - 1)    
+                            }
+                            else{
+								dcImageIDPrd = 'nulo'
+                                echo "A aplicacao ${appName} nao foi encontrada no ambiente de Producao"
+								
+								wrap([$class: 'ParentFolderBuildWrapper']) {
+							        mail to: "${env.listemails}",
+                                    from: "jenkins@pine.com",
+                                    subject: "Nova aplicacao em PRD - ${appName} tag ${TagProducao} ",
+                                    body: """Realizando deploy da aplicação ${appName} no projeto ${appNamespace}. ${env.JOB_URL}""" 
+								}
+								PrdPublic = "true"
+								
+                            }
+							if (dcImageIDHml == dcImageIDPrd && dcImageIDPrd != 'nulo'){
+                                echo "O Hash das imagens são iguais, ${dcImageIDHml}"
+								wrap([$class: 'ParentFolderBuildWrapper']) {  
+							        mail to: "${env.listemails}",
+                                    from: "jenkins@pine.com",
+                                    subject: "Atualizado de variaveis de ambiente em PRD - ${appName} projeto ${appNamespace}",
+                                    body: """Atualizado de variaveis de ambiente em PRD na aplicação ${appName} no projeto ${appNamespace}. ${env.JOB_URL}""" 
+								}
+								goAheadEnv = "true"
+							}
+					    }
+					}
+                }
+            }
+        }
+        stage('Copy Image PRD') {
+		    when{
+                expression {goAheadEnv != "true" || PrdPublic == "true" && dcImageIDPrd != 'nulo'}
+            }
+            steps {
+                script{
+                         imagehml = "docker://registry.hml.pine.com/'${appNamespace}'/'${dcImageStreamHml}':'${TagProducao}'"
+                         imageprd = "docker://openregistry.pine.com/'${appNamespace}'/'${dcImageStreamHml}':'${TagProducao}'"
+                                               
+                         srccreds = credentials('default-token-hrt58')
+                         destcreds = credentials('default-token-8rnld-new')
+                                                             
+                         sh "skopeo copy --dest-creds '${destcreds}' --src-creds '${srccreds}' '${imagehml}' '${imageprd}'"	
+                                            
+                         copyPrd = "true"
+                }
+            } 
+        }
+		stage('Deploy First Time Prd') {
+		    when{
+                    expression {PrdPublic == "true" && copyPrd == "true"}
+                }
+            steps {
+                script {
+                    openshift.withCluster('Homologacao') {
+                        openshift.withProject("${appNamespace}"){
+							dcHml = openshift.selector('dc',"${appName}").object(exportable:true)
+							svcHml = openshift.selector('svc',"${appName}").object(exportable:true)
+						}
+					}
+					openshift.withCluster('Producao'){
+						openshift.withProject("${appNamespace}"){
+							openshift.apply(dcHml)
+							def createDC = openshift.create(svcHml).expose("--hostname=${appName}teste.pine.com")
+							
+							while (!openshift.selector( "dc/${appName}" ).triggers.exists()){
+								sleep(5)
+								echo "Aplicacao ainda nao existe"
+							}
+							if (openshift.selector( "dc/${appName}" ).triggers.exists()){
+								echo "Aplicacao ja existe"
+							}
+							sleep(3000)
+
+							openshift.set("triggers","dc/${appName}","--remove-all")
+                            openshift.set("triggers","dc/${appName}","--from-image=${appNamespace}/${dcImageStreamHml}:${TagProducao}","-c ${appName}","--manual=true")
+							dcPrd = openshift.selector('dc',"${appName}")
+							
+                            wrap([$class: 'ParentFolderBuildWrapper']) {
+							
+								// Obtain an Artifactory server instance
+								def serverArt = Artifactory.server "artfactoryserver"
+							
+								def buildInfo = Artifactory.newBuildInfo()
+								// Set custom build name and number.
+								buildInfo.setName "${appNamespace}"
+							
+								def downloadSpec = """{
+								    "files": [
+									    {
+									    "pattern": "${env.repoName}/${appNamespace}/${appName}-prd.txt",
+									    "flat": "true",
+									    "recursive": "true"
+                                        }
+                                    ]
+                                }""" 
+							
+							    // Download to Artifactory.
+                                def buildDownload = serverArt.download spec: downloadSpec, buildInfo: buildInfo
+								buildDownload
+							}
+							
+                            def rm = dcPrd.rollout()
+							rm.pause()
+							
+							dcEnvSelect = sh (
+                                script: """
+								    cat ${appName}.txt | oc set env -e - dc/${appName} -n ${appNamespace} --overwrite=true
+							    """,
+                            returnStdout: true).trim()
+							
+							rm.resume()
+							rm.latest()
+							
+							deployedPrd = "ok"	
+							
+							logonclusterhml = sh (
+                                script: "oc login -u=${OpenshiftCRED_USR} -p='${OpenshiftCRED_PSW}' --certificate-authority=/run/secrets/kubernetes.io/serviceaccount/ca.crt ${clusterhml}",
+                            returnStdout: true).trim()
+                        }
+                    }
+                }
+            }
+        }
+        stage('Update Prod') {
+		    when{
+                    expression {PrdPublic == "false" && copyPrd == "true"}
+                }
+            steps {
+                script {
+                    openshift.withCluster('Producao'){
+                        openshift.withProject("${appNamespace}"){
+						    dcPrd = openshift.selector('dc',"${appName}")
+                            openshift.set("triggers","dc/${appName}","--remove-all")
+                            openshift.set("triggers","dc/${appName}","--from-image=${appNamespace}/${dcImageStreamHml}:${dcVersionHml}","-c ${appName}","--manual=true")
+
+                            wrap([$class: 'ParentFolderBuildWrapper']) {
+							
+								// Obtain an Artifactory server instance
+								def serverArt = Artifactory.server "artfactoryserver"
+							
+								def buildInfo = Artifactory.newBuildInfo()
+								// Set custom build name and number.
+								buildInfo.setName "${appNamespace}"
+							
+								def downloadSpec = """{
+								    "files": [
+									    {
+									    "pattern": "${env.repoName}/${appNamespace}/${appName}-prd.txt",
+									    "flat": "true",
+									    "recursive": "true"
+                                        }
+                                    ]
+                                }""" 
+							
+							    // Download to Artifactory.
+                                def buildDownload = serverArt.download spec: downloadSpec, buildInfo: buildInfo
+								buildDownload
+							}
+							
+                            def rm = dcPrd.rollout()
+							rm.pause()
+							
+							logonclusterprod = sh (
+                                script: "oc login -u=${OpenshiftCRED_USR} -p='${OpenshiftCRED_PSW}' --insecure-skip-tls-verify=true ${clusterprod}",
+                            returnStdout: true).trim()
+							
+							dcEnvSelect = sh (
+                                script: """
+								    cat ${appName}.txt | oc set env -e - dc/${appName} -n ${appNamespace} --overwrite=true
+							    """,
+                            returnStdout: true).trim()
+							
+							rm.resume()
+							rm.latest()
+							
+							def SVC_port_numberPrd = openshift.selector("svc","${appName}").object().spec.ports.port
+							
+						    if (SVC_port_numberPrd.toString() != "[8080]" && SVC_port_numberHml.toString() == "[8080]"){
+		                        UpdateSVCName = sh (
+                                    script: """
+								        oc patch svc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/name", "value":8080-tcp}]' -n ${appNamespace}
+							        """,
+                                returnStdout: true).trim() 
+								            
+								UpdateSVCnumber = sh (
+                                    script: """
+								        oc patch svc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/port", "value":8080}]' -n ${appNamespace}
+							        """,
+                                returnStdout: true).trim() 
+								            
+								UpdateSVCtarget = sh (
+                                    script: """
+								        oc patch svc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/targetPort", "value":8080}]' -n ${appNamespace}
+							        """,
+                                returnStdout: true).trim()
+											
+								UpdateDCPort = sh (
+                                    script: """
+								        oc patch dc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/template/spec/containers/0/ports/0/containerPort", "value":8080}]' -n ${appNamespace}
+							        """,
+                                returnStdout: true).trim()
+								
+								UpdateDCHealthPort = sh (
+                                    script: """
+								        oc patch dc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/template/spec/containers/0/readinessProbe/tcpSocket/port", "value":8080}]' -n ${appNamespace}
+							        """,
+                                returnStdout: true).trim()
+											
+								UpdateSVCroute = sh (
+                                    script: """
+								        oc patch route ${appName} -p '{"spec":{"port":{"targetPort":"8080-tcp"}}}' -n ${appNamespace}
+							        """,
+                                returnStdout: true).trim()
+							}
+							
+                            deployedPrd = "ok"
+							
+							logonclusterhml = sh (
+                                script: "oc login -u=${OpenshiftCRED_USR} -p='${OpenshiftCRED_PSW}' --certificate-authority=/run/secrets/kubernetes.io/serviceaccount/ca.crt ${clusterhml}",
+                            returnStdout: true).trim()
+                        }
+                    }
+                }
+            }
+        }
+		stage('Update Environment Prd') {
+		    when{
+                    expression {PrdPublic == "false" && copyPrd == "false" && goAheadEnv == "true"}
+                }
+            steps {
+                script {
+                    openshift.withCluster('Producao'){
+                        openshift.withProject("${appNamespace}"){
+						    dcPrd = openshift.selector('dc',"${appName}")
+							
+                            wrap([$class: 'ParentFolderBuildWrapper']) {
+							
+								// Obtain an Artifactory server instance
+								def serverArt = Artifactory.server "artfactoryserver"
+							
+								def buildInfo = Artifactory.newBuildInfo()
+								// Set custom build name and number.
+								buildInfo.setName "${appNamespace}"
+							
+								def downloadSpec = """{
+								    "files": [
+									    {
+									    "pattern": "${env.repoName}/${appNamespace}/${appName}-prd.txt",
+									    "flat": "true",
+									    "recursive": "true"
+                                        }
+                                    ]
+                                }""" 
+							
+							    // Download to Artifactory.
+                                def buildDownload = serverArt.download spec: downloadSpec, buildInfo: buildInfo
+								buildDownload
+							}
+							
+                            def rm = dcPrd.rollout()
+							rm.pause()
+							
+							logonclusterprod = sh (
+                                script: "oc login -u=${OpenshiftCRED_USR} -p='${OpenshiftCRED_PSW}' --insecure-skip-tls-verify=true ${clusterprod}",
+                            returnStdout: true).trim()
+							
+							dcEnvSelect = sh (
+                                script: """
+								    cat ${appName}.txt | oc set env -e - dc/${appName} -n ${appNamespace} --overwrite=true
+							    """,
+                            returnStdout: true).trim()
+							
+							rm.resume()
+							rm.latest()
+							
+							deployedPrd = "ok"
+							
+							logonclusterhml = sh (
+                                script: "oc login -u=${OpenshiftCRED_USR} -p='${OpenshiftCRED_PSW}' --certificate-authority=/run/secrets/kubernetes.io/serviceaccount/ca.crt ${clusterhml}",
+                            returnStdout: true).trim()
+                        }
+                    }
+                }
+            }
+        }
+        stage('Deploy PRD') {
+            steps {
+                script {
+                    openshift.withCluster('Producao') {
+                        openshift.withProject( "${appNamespace}" ) {
+                            if (deployedPrd == "ok"){
+							    latestDeploymentVersion = openshift.selector('dc',"${appName}").object().status.latestVersion
+                                rc = openshift.selector('rc', "${appName}-${latestDeploymentVersion}")
+                                rc.untilEach(1){
+                                rcMap = it.object()
+                                return (rcMap.status.replicas.equals(rcMap.status.readyReplicas))
+                                }
+						    }
+                        }
+                    }
+                }
+            }
+            post {
+                success{
+                    script {
+                        if (deployedPrd == "ok") {
+						    wrap([$class: 'ParentFolderBuildWrapper']) {
+                                   mail to: "${env.listemails}",
+                                   from: "jenkins@pine.com",
+                                   subject: "Deploy Produção - Projeto ${appNamespace} aplicação ${appName}",
+                                   body: "Deploy da aplicação ${appName} realizado com sucesso no projeto ${appNamespace} através da Gmud ${Gmud}"
+                            }
+					    }
+                    }
+                }
+                failure{
+                    script {
+                        if (deployedPrd != "ok") {
+						    wrap([$class: 'ParentFolderBuildWrapper']) {
+                                mail to: "${env.listemails}",
+                                from: "jenkins@pine.com",
+                                subject: "Deploy Produção - Projeto ${appNamespace} aplicação ${appName}",
+                                body: "Erro no deploy da aplicação ${appName} do projeto ${appNamespace} Gmud ${Gmud}"
+						    }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}  

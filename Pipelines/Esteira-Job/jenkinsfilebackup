@@ -1,0 +1,38 @@
+import groovy.json.JsonSlurper
+
+pipeline {
+         agent any
+            environment {
+                    PastaProjeto = "GRPJOBESTEIRATESTE"
+                    PastaAplicacao = "Pine.PortalParceria.Web"
+                    pacotezip = "Pine.PortalParceria.Web-1.22723.zip"	
+            }
+            stages {                  
+                stage('MyStage') {
+                    steps {
+                    ansibleTower(
+                        towerServer: 'Ansible Tower',
+                        towerCredentialsId: '',
+                        templateType: 'job',
+                        jobTemplate: 'Esteira-Jobs',
+                        inventory: '',
+                        jobTags: '',
+                        skipJobTags: '',
+                        limit: '',
+                        removeColor: false,
+                        verbose: true,
+                        credential: '',
+                        extraVars: '''---
+                PastaProjeto: "${PastaProjeto}"
+                PastaAplicacao: "${PastaAplicacao}"
+                pacotezip: "${pacotezip}"
+                ''',
+                        async: false
+        )
+
+        }
+
+                }
+					
+        }
+}

@@ -1,0 +1,247 @@
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, goAheadEnv, testedc, routeexport, newApp, routeHml, dcVersionPrd, dcSelectHml
+pipeline {
+    agent { 
+        label 'jenkins-slave-image-mgmt'
+    }
+	environment {
+		clusterhml = 'https://openshiftmasters.pine.com.br:8443'
+        clusterprod = 'https://openshiftmaster.pine.com:8443'
+        registryHml = 'openregistry.pine.com'
+        registryPrd = 'openregistry.pine.com.br'
+        OpenshiftCRED = credentials('openshifthmltoprd311')
+		
+		grupodeemail = 'tecnologia.infraestrutura@pine.com,noc@pine.com,leonardo.rocha@pine.com'
+		
+		copyPrd = "false"
+		deployedPrdNew = "null"
+		deployedPrdUpdate = "null"
+		PrdPublic = "false"
+		SVC_port_numberHml = "false"
+	}
+    parameters {
+        string(defaultValue: "", description: "Projeto", name: 'appNamespace', trim: true)
+        string(defaultValue: "", description: "Aplicacao", name: 'appname')
+    }
+    stages {
+        stage('Check version Prod Antigo') {
+            steps {
+                script {
+			        openshift.withCluster('Producao') {
+					    appNamespace = "${env.appNamespace.toLowerCase()}"
+						appname = "${env.appname.toLowerCase()}"
+                        openshift.withProject( "${appNamespace}" ) {
+                            if (openshift.selector( "dc/${appName}" ).exists()){
+								    
+                                    //Select Deployment and Version
+									try {
+										dcSelectHml = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.from.name
+										dcVersionHml = "${dcSelectHml}".split(':').last()
+										dcVersionHml = dcVersionHml.substring(0,dcVersionHml.length() - 1)
+									}
+								    catch (err){
+										currentBuild.result = 'ABORTED'
+										error('Jenkins sem permissao no projeto ${appNamespace} em Homologacao')
+									}
+									
+							        //Select ImageStream Name
+							        dcImageStreamHml = "${dcSelectHml}".split(':').first()
+							        dcImageStreamHml = dcImageStreamHml.substring(1,dcImageStreamHml.length())
+								    
+									try {
+										routeHml = openshift.selector('route',"${appName}").object().spec.host
+									}
+									catch (err){
+										echo "A aplicação nao possui Rota"
+									}
+									
+									if (routeHml) {
+										routePrd = "${routeHml}".split('hml').first()
+										routeexport = "yes"
+									}
+									else{
+										echo "Aplicacao não possui rota"
+										routeexport = "not"
+									}         
+                            }
+                            else{
+                                currentBuild.result = 'ABORTED'
+						        error("A aplicacao ${appName} nao foi encontrada em Homologacao")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stage('Check version PRD') {
+            steps {
+                script {
+                    openshift.withCluster('Producao311') {
+                        openshift.withProject( "${appNamespace}" ) {
+                            if (openshift.selector( "dc/${appName}" ).exists() ){
+								
+                                //Select Deployment and Version
+								try {
+									dcSelectPrd = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.from.name
+									dcVersionPrd = "${dcSelectPrd}".split(':').last()
+									dcVersionPrd = dcVersionPrd.substring(0,dcVersionPrd.length() - 1)
+                                }
+								catch (err){
+									currentBuild.result = 'ABORTED'
+									error('Jenkins sem permissao no projeto ${appNamespace} em Producao')
+								}
+								
+							    //Select ImageStream Name
+							    dcImageStreamPrd = "${dcSelectPrd}".split(':').first()
+							    dcImageStreamPrd = dcImageStreamPrd.substring(1,dcImageStreamPrd.length())
+								
+                            }
+                            else{
+								dcImageIDPrd = 'nulo'
+                                echo "A aplicacao ${appName} no projeto ${appNamespace} nao foi encontrada no ambiente de Producao"
+								PrdPublic = "true"
+                            }
+
+					    }
+					}
+                }
+            }
+        }
+        stage('Copy Image PRD') {
+		    when{
+                expression {goAheadEnv != "true" || PrdPublic == "true" && dcImageIDPrd != 'nulo'}
+            }
+            steps {
+                script{
+                        imagehml = "docker://openregistry.pine.com/'${appNamespace}'/'${dcImageStreamHml}':'${dcVersionHml}'"
+                        imageprd = "docker://openregistry.pine.com.br/'${appNamespace}'/'${dcImageStreamHml}':'${dcVersionHml}'"
+                                               
+                        srccreds = credentials('openshiftprod')
+                        destcreds = credentials('openshiftprod311')
+                        
+                        try{						
+							sh "skopeo copy --dest-creds '${destcreds}' --src-creds '${srccreds}' '${imagehml}' '${imageprd}'"	
+                        }
+                        catch(err){
+						    currentBuild.result = 'ABORTED'
+						    error('Falha ao copiar imagem docker ${imagehml} de Homologacao para Producao311')	
+                        }						
+                        copyPrd = "true"
+                }
+            } 
+        }
+		stage('Deploy First Time Prd') {
+		    when{
+                    expression {PrdPublic == "true" && copyPrd == "true"}
+                }
+            steps {
+                script {
+                    openshift.withCluster('Producao') {
+                        openshift.withProject("${appNamespace}"){
+							dcHml = openshift.selector('dc',"${appName}").object(exportable:true)
+						}
+					}
+					openshift.withCluster('Producao311'){
+						openshift.withProject("${appNamespace}"){
+							if (routeexport == "yes"){
+								
+								//Deploy application
+								openshift.newApp("'${appNamespace}'/'${dcImageStreamHml}':'${dcVersionHml}' --name='${appName}'").narrow('svc').expose("--hostname=${routePrd}")
+								
+								dcPrd = openshift.selector('dc',"${appName}")
+								def rm = dcPrd.rollout().status()
+								
+								openshift.apply(dcHml)
+							}
+							else
+							{
+							    openshift.newApp("'${appNamespace}'/'${dcImageStreamHml}':'${dcVersionHml}' --name='${appName}'")
+								
+								dcPrd = openshift.selector('dc',"${appName}")
+								def rm = dcPrd.rollout().status()
+								
+								openshift.apply(dcHml)
+							}
+                        }
+                    }
+                }
+            }
+        }
+        stage('Update Prod') {
+		    when{
+                    expression {PrdPublic == "false" && copyPrd == "true"}
+                }
+            steps {
+                script {
+                    openshift.withCluster('Producao311'){
+                        openshift.withProject("${appNamespace}"){
+							
+								dcPrd = openshift.selector('dc',"${appName}")
+								def rm = dcPrd.rollout()
+								rm.pause()
+								
+								//Remove Current Trigger and Apply New
+								openshift.set("triggers","deploymentconfigs","${appname}","--remove-all")
+								openshift.set("triggers","deploymentconfigs","${appName}","--from-image=${appNamespace}/${dcImageStreamPrd}:${dcVersionHml}","-c ${appName}","--manual=true")
+								
+								rm.resume()
+							    rm.latest()
+								
+								//Get Current Port of the Service
+								def SVC_port_numberPrd = openshift.selector("svc","${appName}").object().spec.ports.port
+								
+						        logonclusterprod = sh (
+                                script: "oc login -u=${OpenshiftCRED_USR} -p='${OpenshiftCRED_PSW}' --insecure-skip-tls-verify=true ${clusterprod}",
+                                returnStdout: true).trim()
+								
+								//If Port of the new Container not equal Current
+								if (SVC_port_numberPrd.toString() != "[8080]" && SVC_port_numberHml.toString() == "[8080]"){
+									UpdateSVCName = sh (
+										script: """
+											oc patch svc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/name", "value":8080-tcp}]' -n ${appNamespace}
+										""",
+									returnStdout: true).trim() 
+												
+									UpdateSVCnumber = sh (
+										script: """
+											oc patch svc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/port", "value":8080}]' -n ${appNamespace}
+										""",
+									returnStdout: true).trim() 
+												
+									UpdateSVCtarget = sh (
+										script: """
+											oc patch svc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/targetPort", "value":8080}]' -n ${appNamespace}
+										""",
+									returnStdout: true).trim()
+												
+									UpdateDCPort = sh (
+										script: """
+											oc patch dc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/template/spec/containers/0/ports/0/containerPort", "value":8080}]' -n ${appNamespace}
+										""",
+									returnStdout: true).trim()
+									
+									UpdateDCHealthPort = sh (
+										script: """
+											oc patch dc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/template/spec/containers/0/readinessProbe/tcpSocket/port", "value":8080}]' -n ${appNamespace}
+										""",
+									returnStdout: true).trim()
+												
+									UpdateSVCroute = sh (
+										script: """
+											oc patch route ${appName} -p '{"spec":{"port":{"targetPort":"8080-tcp"}}}' -n ${appNamespace}
+										""",
+									returnStdout: true).trim()
+								}
+								
+
+								
+								
+								logonclusterhml = sh (
+                                script: "oc login -u=${OpenshiftCRED_USR} -p='${OpenshiftCRED_PSW}' --certificate-authority=/run/secrets/kubernetes.io/serviceaccount/ca.crt ${clusterhml}",
+                                returnStdout: true).trim()
+						}
+                    }
+                }
+            }
+        }
+    }
+}  

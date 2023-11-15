@@ -1,0 +1,109 @@
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, VersionBranch
+pipeline {
+    agent { 
+        label 'slave-dotnet-fortify'
+    }
+	environment {
+	    SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+	}
+    parameters {
+	    string(defaultValue: "", description: '', name: 'projectKey') 
+		string(defaultValue: "", description: '', name: 'requestby')
+		string(defaultValue: "", description: '', name: 'repositoryUri')
+		string(defaultValue: "", description: '', name: 'buildNumber')
+        string(defaultValue: "", description: '', name: 'branchName')
+		string(defaultValue: "", description: '', name: 'buildname')
+		string(defaultValue: "", description: '', name: 'solutionFile')
+        string(defaultValue: "enable", description: '', name: 'fortify')
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+				    def gitURL = env.repositoryUri
+				    if (env.branchName.startsWith('release'))
+					{					
+						checkout([
+							$class: 'GitSCM',
+							branches: [[name: "Release/${env.branchName}"]],
+							doGenerateSubmoduleConfigurations: false,
+							extensions: [[$class: 'CleanCheckout'],[$class: 'WipeWorkspace']],
+							submoduleCfg: [], 
+							userRemoteConfigs: [[credentialsId: 'jenkins-slave-user', url: "${gitURL}"]],
+							doGenerateSubmoduleConfigurations: false
+						])
+					}else
+					{					
+						checkout([
+							$class: 'GitSCM',
+							branches: [[name: "${env.branchName}"]],
+							doGenerateSubmoduleConfigurations: false,
+							extensions: [[$class: 'CleanCheckout']],
+							submoduleCfg: [], 
+							userRemoteConfigs: [[credentialsId: 'jenkins-slave-user', url: "${gitURL}"]],
+							doGenerateSubmoduleConfigurations: false
+						])
+					}
+					if (fileExists ('version')){
+					    def versionFile = bat(script: 'type version', returnStdout: true).trim()
+						version = "${versionFile}${env.buildNumber}" 
+						echo "${versionFile}"
+					}
+					else
+					{
+						def defaultVersion = "1.0."
+						version = "${defaultVersion}${env.buildNumber}"
+					}
+					echo "Started job from TFS Build name: ${env.buildname}"
+                    echo "New version: ${version}"
+                }
+            }
+        }
+		stage('Build') {
+            steps {
+                script {
+                    bat "msbuild ${env.solutionFile} /t:Build /p:outdir="${env.projectKey}" /p:Configuration=Release /p:Platform="Any CPU" /p:RestoreSources=https://artifactory.hml.pine.com/artifactory/api/nuget/pine-nuget /p:VisualStudioVersion=14.0"
+                }
+            }
+        }
+		stage('Fortify') {
+			steps {
+				script {
+					def FortifyHome = 'C:/Program Files/Fortify/Fortify_SCA_and_Apps_19.1.0/bin'
+						if (env.branchName.startsWith('release'))
+						{					
+							VersionBranch="release"
+						}
+						if (env.branchName.startsWith('desenvolvimento'))
+						{					
+							VersionBranch="desenvolvimento"
+						}
+						if (env.branchName == 'master')
+						{					
+							VersionBranch="master"
+						}
+						bat "java -jar C:\\Jenkins\\Fortify\\dotnet\\fortify-api-client-0.0.3-jar-with-dependencies.jar create -n \"${env.projectKey.toLowerCase()}\" -v \"${VersionBranch}\""
+						bat "fortifyupdate -acceptSSLCertificate -acceptKey"
+						bat "sourceanalyzer  -b \"${env.buildname.toLowerCase()}\" -clean "
+						bat "sourceanalyzer  -b \"${env.buildname.toLowerCase()}\" \".\" "
+						bat "sourceanalyzer  -b \"${env.buildname.toLowerCase()}\" -scan -f \"results.fpr\" "
+						bat "fortifyclient  -url \"https://fortify.pine.com/ssc\" -authtoken \"f16410dc-4fc7-4b26-b7f9-93f4da46e07f\" uploadFPR -f \"results.fpr\" -project \"${env.projectKey.toLowerCase()}\" -version \"${VersionBranch}\" "
+					
+					sleep 10
+					bat "java -jar C:\\Jenkins\\Fortify\\dotnet\\fortify-api-client-0.0.3-jar-with-dependencies.jar waitArtifactProcess -n \"${env.projectKey.toLowerCase()}\" -v \"${VersionBranch}\""
+					fortifyResult = bat(returnStdout:true , script: "java -jar C:\\Jenkins\\Fortify\\dotnet\\fortify-api-client-0.0.3-jar-with-dependencies.jar report -n \"${env.projectKey.toLowerCase()}\" -v \"${VersionBranch}\"").trim()
+					echo fortifyResult
+					
+					if (VersionBranch == "release" && fortifyResult.contains('Critical')){
+						currentBuild.result = 'Failure: Foram encontradas vulnerabilidades críticas no código-fonte. Favor corrigir !'
+						error "Foram encontradas vulnerabilidades críticas no código-fonte. Favor corrigir !" 
+					}
+						
+					if (VersionBranch == "desenvolvimento" && fortifyResult.contains('Critical')){
+						echo "Foram encontradas vulnerabilidades críticas no código-fonte. Favor corrigir antes de realizar deploy em Homologacao!" 
+					}
+				}
+			}
+		}
+    }
+}

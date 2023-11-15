@@ -1,0 +1,99 @@
+@Library('JenkinsSharedLibrary')
+import com.pine.nuget
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, VersionBranch, archivePath, passarSonar
+pipeline {
+    agent { 
+        label 'slave-aspnet-windows-01'
+    }
+	environment {
+	    SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+		repoName = "npm-iis-deploy"
+		pathAgente = "C:\\jenkins\\workspace\\EntregaContinua\\EntregaContinua-AspNet\\Publish\\"
+	}
+    parameters {
+	    string(defaultValue: "", description: '', name: 'projectKey') 
+		string(defaultValue: "", description: '', name: 'requestby')
+		string(defaultValue: "", description: '', name: 'repositoryUri')
+		string(defaultValue: "", description: '', name: 'buildNumber')
+        string(defaultValue: "", description: '', name: 'branchName')
+		string(defaultValue: "", description: '', name: 'commit')
+        string(defaultValue: "", description: '', name: 'solutionFile')
+        string(defaultValue: "", description: '', name: 'buildFile')
+		string(defaultValue: "", description: '', name: 'buildname')
+		string(defaultValue: "", description: '', name: 'serverHost')
+		string(defaultValue: "", description: '', name: 'website_nameiis')
+		string(defaultValue: "", description: '', name: 'srv_site')
+        string(defaultValue: "enabled", description: '', name: 'sonarqube')
+        string(defaultValue: "enabled", description: '', name: 'fortify')
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+				    echo "${env.workspace}"
+					
+				    def gitURL = env.repositoryUri
+				    if (env.branchName.startsWith('release'))
+					{					
+						git branch: "Release/${env.branchName}", credentialsId: 'jenkins-slave-user', url: "${gitURL}"
+					}else
+					{					
+						git branch: "${env.branchName}", credentialsId: 'jenkins-slave-user', url: "${gitURL}"
+					}
+					if (fileExists ('version')){
+					    def versionFile = bat(script: 'type version', returnStdout: true).trim()
+						version = "${versionFile}${env.buildNumber}" 
+						echo "${versionFile}"
+					}
+					else
+					{
+						def defaultVersion = "1.0."
+						version = "${defaultVersion}${env.buildNumber}"
+					}
+					echo "Started job from TFS Build name: ${env.buildname}"
+                    echo "New version: ${version}"
+                }
+            }
+        }
+        stage('Build Project') {
+            steps {
+                script {
+					def nuget = new nuget(this)
+					nuget.restorePackages()
+					
+                    bat "msbuild ${env.solutionFile} /p:DeployOnBuild=true /t:Rebuild /p:PackageTempRootDir=${pathAgente}${env.projectKey} /p:Configuration=Release /p:Platform=\"Any CPU\" /p:AutoParameterizationWebConfigConnectionStrings=False"
+					
+                    zip zipFile: "${pathAgente}/${env.projectKey}-${env.buildNumber}.zip", archive: false, dir: "${pathAgente}${env.projectKey}\\PackageTmp"
+
+                }
+            }
+        }
+	    stage('Code Check') {
+            parallel {
+		        stage('Fortify') {
+                    when {
+                        expression { env.fortify != 'skip' }
+                    }
+                    steps {
+                        script {
+							def FortifyHome = 'C:/Program Files/Fortify/Fortify_SCA_and_Apps_19.1.0/bin/'
+                                if (env.branchName.startsWith('release'))
+                                {                    
+                                    VersionBranch="hml"
+                                }
+                                if (env.branchName.startsWith('desenvolvimento'))
+                                {                    
+                                    VersionBranch="dev"
+                                }
+                                bat "java -jar C:\\Jenkins\\Fortify\\aspnet2\\fortify-api-client-0.0.3-jar-with-dependencies.jar create -n \"${env.projectKey.toLowerCase()}\" -v \"${VersionBranch}\""
+                                bat "${FortifyHome}sourceanalyzer  -b \"${env.buildname.toLowerCase()}\" -clean "
+                                bat "${FortifyHome}sourceanalyzer  -b \"${env.buildname.toLowerCase()}\" \".\" "
+                                bat "${FortifyHome}sourceanalyzer  -b \"${env.buildname.toLowerCase()}\" -scan -f \"results.fpr\" "
+                                bat "${FortifyHome}fortifyclient  -url \"https://fortify.pine.com/ssc\" -authtoken \"f16410dc-4fc7-4b26-b7f9-93f4da46e07f\" uploadFPR -f \"results.fpr\" -project \"${env.projectKey.toLowerCase()}\" -version \"${VersionBranch}\" "
+                        }
+                    }
+                 }
+			}
+		}            
+	}
+}

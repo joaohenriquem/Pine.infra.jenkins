@@ -1,0 +1,120 @@
+pipeline {
+         agent any
+            environment {
+				    BDNameOrigem = "FINBNTDBS"
+				    BDNameDestino = "FINBNTDBS"
+					ServerOrigem = "W16PNHPSQL10A"
+					ServerDestino = "PINEHMLSQL02"
+				    bkpstatus = ''
+                    rebuild = 'null'
+                    userInput = 'null'
+                    goAhead1 = "null"			
+				    sqlcmd_path = "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\110\\Tools\\Binn"
+				    SQLCRED = credentials('sqlbkprestore')
+                    validabackup = 'null'
+                    validarestore = 'null'				
+            }
+            stages {
+
+				stage('Execucao - Backup de Homologacao') {
+                    steps {
+						ws("${sqlcmd_path}"){
+                            script {
+							    if (changenumber != "") {
+                                    backuprestore2 = powershell (
+                                    script: """
+									         SQLCMD -S w16pnhpsql06 -U ${SQLCRED_USR} -P ${SQLCRED_PSW} -W -Q "EXEC DBO.DoBackup '${BDNameOrigem}'"
+											 """,
+                                    returnStdout: true)
+									
+									echo "${backuprestore2}"
+                                }
+                            }
+                            
+                        }
+                    }
+                }
+                stage('Execucao - Backup Restore') {
+                    steps {
+						ws("${sqlcmd_path}"){
+                            script {
+							    if (changenumber != "") {
+                                    backuprestore = powershell (
+                                    script: """
+									         SQLCMD -S pineprdsql06 -U ${SQLCRED_USR} -P ${SQLCRED_PSW} -W -Q "EXEC DBAPINE_CUBE.DBO.spBackupRestorev2 '${BDNameOrigem}','${BDNameDestino}','${ServerOrigem}','${ServerDestino}'"
+											 """,
+                                    returnStdout: true)
+									
+									echo "${backuprestore}"
+                                }
+                            }
+                            
+                        }
+                    }
+                }
+                stage('Validando - Backup Restore') {
+                    steps {
+                        script {
+							//Valida backup
+							validabackup = backuprestore.contains('BACKUP DATABASE successfully')
+							
+							//Valida Restore
+							validarestore = backuprestore.contains('RESTORE DATABASE successfully')
+							if (validabackup == true){
+								echo "Backup Executado com sucesso"
+							}
+							else
+							{
+								echo "Backup apresentou falha"
+								currentBuild.result = 'ABORTED'
+							}
+							
+							if (validarestore == true){
+								echo "Restore Executado com sucesso"
+							}
+							else
+							{
+								echo "Restore apresentou falha"
+								currentBuild.result = 'ABORTED'
+							}
+										
+							if (validabackup == true && validarestore == true) {
+								wrap([$class: 'ParentFolderBuildWrapper']) {
+									httpRequest customHeaders: [[maskValue: false, name: 'Authorization', value: "${env.APIAuthorization}"]], httpMode: 'PATCH', ignoreSslErrors: true, requestBody: '''[
+									{
+										"op": "replace",
+										"path": "/status",
+										"value": "Fechada"
+									},
+									{
+										"op": "add",
+										"path": "/progressTrail",
+										"value": "Backup e Restore do banco de dados realizado com sucesso."
+									}
+									]''',
+									responseHandle: 'NONE', url: "${env.APIchangemgmt}${changenumber}"
+								}
+							}
+							else
+							{
+								wrap([$class: 'ParentFolderBuildWrapper']) {
+									httpRequest customHeaders: [[maskValue: false, name: 'Authorization', value: "${env.APIAuthorization}"]], httpMode: 'PATCH', ignoreSslErrors: true, requestBody: '''[
+									{
+										"op": "replace",
+										"path": "/status",
+										"value": "Iniciada"
+									},
+									{
+										"op": "add",
+										"path": "/progressTrail",
+										"value": "Ocorreu erro durante Backup Restore do banco de dados - Favor validar com a Infraestrutura"
+									}
+									]''',
+									responseHandle: 'NONE', url: "${env.APIchangemgmt}${changenumber}"
+								}
+							}
+                        } 
+                    }
+                }
+            }					
+        }

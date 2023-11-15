@@ -1,0 +1,104 @@
+TESTEpipeline {
+         agent any
+                
+                environment {
+				    BDNameOrigem = "BaseUnicaRendaFixa"
+				    BDNameDestino = "BaseUnicaRendaFixa"
+					ServerOrigem = "PINEPRDSQL04"
+					ServerDestino = "PINEHMLSQL02"
+					approvalEmail = "rodrigo.bonfim@pine.com"
+					bkpstatus = ''
+                    rebuild = 'null'
+                    userInput = 'null'
+                    goAhead1 = "null"			
+					sqlcmd_path = "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\110\\Tools\\Binn"
+					SQLCRED = credentials('sqlbkprestore')
+                    validabackup = 'null'
+                    validarestore = 'null'				
+                }
+                stages {
+				        stage('Aprovacao - Owner Database') {
+							steps {
+								script {  
+								    wrap([$class: 'BuildUser']){
+                                       mail to: "${approvalEmail}",
+                                       from: "jenkins@pine.com",
+                                       subject: "Aprovação Backup/Restore - Banco de dados ${BDNameOrigem}",
+                                       body: """Uma solicitação de Backup / Restore de banco de dados foi solicitado.\r\n\r\n
+Solicitante: ${ENV:BUILD_USER}\r\n
+Banco de dados Origem: ${BDNameOrigem}\r\n
+Banco de dados Destino: ${BDNameDestino}\r\n
+Servidor Origem: ${ServerOrigem}\r\n
+Servidor Destino: ${ServerDestino}\r\n\r\n
+
+Link para aprovação: ${env.JOB_URL}"""
+								    }
+                                    timeout(time: 1, unit: 'DAYS') {
+                                        goAhead1 = input(
+                                            id: 'userInput', message: 'Aprova o Backup/Restore?', submitter:'GRPJenkinsSMGAprov', ok: 'Confirmar', parameters: [[$class: 'BooleanParameterDefinition', defaultValue: true,  description: 'Selecione o checkbox', name: 'Aprovar']])
+                                    }
+                                }
+                            }
+                        }                    
+                        stage('Execucao - Backup Restore') {
+                            steps {
+						        ws("${sqlcmd_path}"){
+                                script {
+							       if (goAhead1 == true) {
+                                     backuprestore = powershell (
+                                     script: """
+									         SQLCMD -S pineprdsql06 -U ${SQLCRED_USR} -P ${SQLCRED_PSW} -W -Q "EXEC DBAPINE_CUBE.DBO.spBackupRestorev2 '${BDNameOrigem}','${BDNameDestino}','${ServerOrigem}','${ServerDestino}'"
+											 """,
+                                     returnStdout: true)
+                                }
+
+                            }
+                            
+                           }
+                          }
+                        }
+                        stage('Validando - Backup Restore') {
+                            steps {
+                                script {
+								        //Valida backup
+										validabackup = backuprestore.contains('BACKUP DATABASE successfully')
+										//Valida Restore
+										validarestore = backuprestore.contains('RESTORE DATABASE successfully')
+										if (validabackup == true){
+											echo "Backup Executado com sucesso"
+										}
+										else
+										{
+											echo "Backup apresentou falha"
+										}
+										if (validarestore == true){
+											echo "Restore Executado com sucesso"
+										}
+										else
+										{
+											echo "Restore apresentou falha"
+										}
+										
+										if (validabackup == true && validarestore == true) {
+										 wrap([$class: 'BuildUser']){
+											mail to: "${approvalEmail},${ENV:BUILD_USER_EMAIL}",
+											from: "jenkins@pine.com",
+											subject: "Backup Restore - Banco de dados ${BDNameOrigem} executado com sucesso",
+											body: "Backup  Restore do banco de dados ${BDNameOrigem} foi concluido com sucesso"
+										  }
+										}
+										else
+										{
+										 wrap([$class: 'BuildUser']){
+										   mail to: "${approvalEmail},${ENV:BUILD_USER_EMAIL}",
+											from: "jenkins@pine.com",
+											subject: "Backup/Restore - Banco de dados ${BDNameOrigem} apresentou falha",
+											body: "Backup  Restore do banco de dados ${BDNameOrigem} apresentou falha na execução"
+										  }
+								        }
+                                } 
+
+                            }
+                          }
+                        }						
+}          

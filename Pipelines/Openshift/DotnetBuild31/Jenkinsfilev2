@@ -1,0 +1,266 @@
+@Library('JenkinsSharedLibrary')
+
+import java.text.SimpleDateFormat
+import com.pine.openshiftLib
+import com.pine.nugetLib
+import com.pine.gitLib
+
+def targetEnvironment, applicationVersion, buildConfiguration, deployConfiguration, imageStream, openShiftProject, openShiftApplication, dotnetVersion
+
+pipeline {
+    agent { 
+        label 'jenkins-slave-dotnet-31'
+    }
+	environment {
+        tfsCredential = 'jenkins-slave-user'
+        outputLineBreak = '***********************************************************************************************************************************'
+    }
+    parameters {
+	    string(name: 'projectKey'		            , defaultValue: ''          , description: 'Nome da aplicação (igual ao nome do repositório git)') 
+		string(name: 'requestby'                  	, defaultValue: ''          , description: 'Nome do solicitante')
+		string(name: 'repositoryUri'                , defaultValue: ''          , description: 'Endereço do repositório git')
+		string(name: 'buildNumber'                  , defaultValue: ''          , description: 'Número do build no tfs')
+        string(name: 'branchName'                   , defaultValue: ''          , description: 'Nome da branch')
+		string(name: 'commit'                       , defaultValue: ''          , description: 'Commit a ser construído (por padrão, deve ser o mais recente da branch)')
+		string(name: 'projectName'		            , defaultValue: ''          , description: 'Projeto do Open Shift onde fica a aplicação')
+		string(name: 'imagename'         			, defaultValue: ''          , description: 'Nome da aplicação no open shift (esta será o nome base para o dns, image stream e build configuration)')
+        string(name: 'sonarqubeStatus'              , defaultValue: ''          , description: 'Ativação da ferramenta SonarQube na esteira para o projeto')
+        string(name: 'fortify'                      , defaultValue: 'skip'      , description: 'Ativação da ferramenta Fortify na esteira para o projeto')
+		string(name: 'solutionFile'					, defaultValue: ''          , description: 'Caminho do arquivo da solution')
+        string(name: 'buildFile'					, defaultValue: ''          , description: 'Caminho do arquivo do csproj startup')
+    }
+    stages {
+        stage('Configuration') {
+            steps {
+                script {
+                    //Define versão do .net
+                    dotnetVersion = '3.1'
+					//Transforma algumas variáveis da esteira antiga
+					openShiftProject = env.projectName
+					openShiftApplication = env.imagename
+                    //Define variável com o ambiente conforme nome da branch
+                    targetEnvironment = (env.branchName.toLowerCase() == 'master' ? 'prd': (env.branchName.toLowerCase().startsWith('release') ? 'hml' : 'dev'))
+                    //Define nome do build configuration no Open Shift
+                    buildConfiguration = "${env.projectKey.toLowerCase()}-${targetEnvironment}"
+                    //Define nome do deploy configuration no Open Shift
+					deployConfiguration = "${openShiftApplication.toLowerCase()}"
+                    //Define nome do image stream
+                    imageStream = "${openShiftApplication.toLowerCase()}"
+                    //Ajusta projeto, quando for desenvolvimento
+                    if (targetEnvironment == 'dev') {
+                        openShiftProject = "${openShiftProject}-dev"
+                    }
+                }
+            }
+        }
+        stage('Checkout') {
+            when {
+                expression { targetEnvironment == 'dev' ||  targetEnvironment == 'hml' }
+            }
+            steps {
+                script {
+					//Realiza checkout da branch
+                    if (targetEnvironment == 'hml')
+                    {					
+                        git branch: "Release/${branchName}", credentialsId: tfsCredential, url: env.repositoryUri
+                    }else
+                    {					
+                        git branch: "${branchName}", credentialsId: tfsCredential, url: env.repositoryUri
+                    }
+                }
+            }
+        }
+		stage('Compliance') {
+            when {
+                expression { targetEnvironment == 'dev' ||  targetEnvironment == 'hml' }
+            }
+			steps {
+				script {
+				    def gitLib = new gitLib(this, targetEnvironment)
+                    //Verifica se branch está 0 commits atrás da master
+                    if (targetEnvironment != 'dev') {
+                        gitLib.checkIfBehindMaster("Release/${env.branchName}", env.repositoryUri)
+                    }
+					//Define a versão da aplicação
+					applicationVersion = gitLib.getVersionFromBuildProps(env.buildNumber)
+    			}
+			}
+		}
+        stage('Code Check') {
+             parallel {
+                 stage('Sonarqube') {
+                    when {
+                        expression { (targetEnvironment == 'dev' ||  targetEnvironment == 'hml') && env.sonarqubeStatus != 'skip' }
+                    }
+                    steps {
+                        script {
+						    def sonarScanner = tool name: 'dotnet-sonar-scanner-31'
+                            withSonarQubeEnv('sonarpine') {
+								
+								//Code Check Sonarqube
+								def sonarScannerBin = "${sonarScanner}/SonarScanner.MSBuild.dll"
+							    sh "dotnet restore ${env.solutionFile} -s http://artifactory.hml.pine.com:8081/artifactory/api/nuget/pine-nuget -s https://api.nuget.org/v3/index.json"
+								sh "dotnet ${sonarScannerBin} begin /k:\"${env.projectKey}\" /n:\"${env.projectKey}\" /v:\"${env.buildNumber}\" /d:sonar.host.url=\"${SONAR_HOST_URL}\" /d:sonar.sourceEncoding=UTF-8 /d:sonar.cs.opencover.reportsPaths=/**/*.xml"
+								sh "dotnet build ${env.solutionFile} --configuration Release --source http://artifactory.hml.pine.com:8081/artifactory/api/nuget/pine-nuget"
+								sh "dotnet ${sonarScannerBin} end"
+							}
+							
+							//Check quality gate Result
+							def qualityGateResult = null
+							timeout(time: 30, unit: 'MINUTES') {
+								qualityGateResult = waitForQualityGate()
+							}
+
+                            if(qualityGateResult.status == 'OK') {
+                                echo "Sonar quality gateway - Projeto passou no teste de qualidade!"
+                            } 
+                            else {
+                                error "Sonar quality gateway - Projeto nao passou no teste de qualidade do Sonarqube!"
+                            }
+                        }
+                    }
+                }
+
+				stage('Fortify') {
+                    when {
+                        expression { (targetEnvironment == 'dev' ||  targetEnvironment == 'hml') && env.fortify == 'run' }
+                    }
+                    steps {
+                        script {
+							def buildFortify = build job: 'EntregaContinua-Dotnet-Fortify', 
+								parameters: [
+								[$class: 'StringParameterValue', name: 'projectKey', value: "${projectKey}"], 
+								[$class: 'StringParameterValue', name: 'requestby', value: "${requestby}"],
+								[$class: 'StringParameterValue', name: 'repositoryUri', value: "${repositoryUri}"],
+								[$class: 'StringParameterValue', name: 'buildNumber', value: "${buildNumber}"],
+								[$class: 'StringParameterValue', name: 'branchName', value: "${branchName}"],
+								[$class: 'StringParameterValue', name: 'buildname', value: "${buildname}"],
+								[$class: 'StringParameterValue', name: 'solutionFile', value: "${solutionFile}"]
+								], wait: true, propagate: true
+                        }
+                    }
+                 }
+           
+             }
+		}
+        stage('Build') {
+            when {
+                expression { targetEnvironment == 'dev' ||  targetEnvironment == 'hml' }
+            }
+            steps {
+                script {
+                    openshift.withCluster() {
+						//Faz ajuste no nome do deploy configuration (por causa da esteira antiga)
+						openshift.withProject( openShiftProject ) {							
+							if (openshift.selector( "dc/${deployConfiguration.replace(".", "")}" ).exists()) {
+								deployConfiguration = deployConfiguration.replace(".", "")
+							}
+							if (openshift.selector( "dc/${deployConfiguration.replace(".", "-")}" ).exists()) {
+								deployConfiguration = deployConfiguration.replace(".", "-")
+							}
+						}
+                        //Cria image stream caso não exista
+                        openshift.withProject( openShiftProject ) {
+                            if (!openshift.selector('is', imageStream).exists()) {
+                                app = openshift.newApp("${imageStream}:applicationVersion","--allow-missing-images=true --allow-missing-imagestream-tags=true --no-install=true --name=${deployConfiguration}")
+                                openshift.create("imagestream","${imageStream}")
+                            }
+                        }
+                        //Executa build
+                        openshift.withProject( "cicd" ) {
+                            def gitURLBuild = env.repositoryUri.replace('https://', 'ssh://svc135@')
+                            //Verifica se precisa ajustar a versão da imagem de build (caso já exista um build configuration, porém em versão do dotnet anterior)
+                            def openshiftLib = new openshiftLib(this, targetEnvironment)
+                            def baseDotnetImageVersion = openshiftLib.getBuildImageVersion(dotnetVersion)
+                            //Cria build configuration, caso não exista
+                            if (!openshift.selector('bc', buildConfiguration).exists() ) {
+                                //Cria build configuration, caso não exista com base
+                                openshift.create(openshift.process('openshift/templates/pine-dotnet',"-p=NAME=${buildConfiguration}","-p=BUILDIMAGEVERSION=${baseDotnetImageVersion}","-p=IMAGESTREAM=${imageStream}:${applicationVersion}","-p=NAMESPACE=${openShiftProject}","-p=BRANCHNAME=${env.commit}","-p=GITURLBUILD=${gitURLBuild}","-p=SOLUTIONFILE=${env.buildFile}"))
+                            }
+                            //Atualiza dados do build configuration
+                            openshiftLib.patchBuildConfiguration(baseDotnetImageVersion, buildConfiguration, imageStream, env.commit, applicationVersion)
+                            //Inicia build no Open Shift
+                            def build = openshift.selector('bc', buildConfiguration).startBuild()
+                            build.logs('-f')                         
+                        }
+                        //Aguarda que o OpenShift termine de subir a imagem no registry (esta etapa começou a ter um delay sem motivo aparente)
+                        def imgExists = false
+                        def ct = 0
+                        while (!imgExists) {
+                            openshift.withProject( openShiftProject ) {
+                                imgExists = openshift.selector('istag',"${imageStream}:${applicationVersion}").exists()
+                            }
+                            if (ct >= 18) {
+                                //Se após 3 minutos a imagem não estiver no registry, cancela esteira
+                                error("Imagem não foi publicada corretamente no build: ${imageStream}:${applicationVersion}")
+                            }
+                            ct ++
+                            sleep (10)
+                        }
+                    }
+                }
+            }
+        }
+        stage('Publish') {
+            when {
+                expression { targetEnvironment == 'dev' ||  targetEnvironment == 'hml' }
+            }
+            steps {
+                script {
+                    openshift.withCluster() {
+                        openshift.withProject( openShiftProject ) {
+                            def openshiftLib = new openshiftLib(this, targetEnvironment)
+                            //Cria deploy configuration, caso não exista
+                            if (!openshift.selector('dc', deployConfiguration).exists())  {
+                                //Carrega variáveis de ambiente para mmontar o deploy config da aplicação
+                                def envs = openshiftLib.getEnvironmentFromLaunchSettings(openShiftProject, deployConfiguration, env.buildFile, applicationVersion, targetEnvironment)
+
+                                //Cria nova aplicação
+                                app = openshift.newApp("${imageStream}:${applicationVersion}","--no-install=true --name=${deployConfiguration} ${envs}")
+
+                                //Aguarda fm do rollout da aplicação
+                                def ocRollout = sh (script: """
+                                    oc project ${openShiftProject}
+                                    oc rollout status dc/${deployConfiguration}
+                                """, returnStdout: true).trim()
+                                echo ocRollout
+
+                                //Remove triggers de deploy automático
+                                openshift.set("triggers", "dc/${deployConfiguration}", "--manual")
+                                
+                                //Expõe rota
+                                app.narrow('svc').expose("--hostname=${deployConfiguration}.${targetEnvironment}.pine.com")
+                            } else {
+                                //Troca versão da imagem
+                                openshift.set("triggers","dc/${deployConfiguration}","--remove-all")
+                                openshift.set("triggers","dc ${deployConfiguration}","--from-image=${imageStream}:${applicationVersion}","-c ${deployConfiguration}","--manual=true")
+                                
+                                //Aplica variáveis de ambiente
+                                openshiftLib.setEnvironmentFromLaunchSettings(openShiftProject, deployConfiguration, env.buildFile, applicationVersion, targetEnvironment)
+                            }
+                            //Configura Health Check
+                            openshiftLib.setHealthCheckHttp(openShiftProject, deployConfiguration)
+
+                            //Aplica rollout
+                            openshift.selector('dc', deployConfiguration).rollout().latest()
+                        }
+                    }
+                }
+            }
+        }
+        stage('Rollout') {
+            when {
+                expression { targetEnvironment == 'dev' ||  targetEnvironment == 'hml' }
+            }
+            steps {
+                script {
+                    def ocRollout = sh (script: """
+                        oc project ${openShiftProject}
+                        oc rollout status dc/${deployConfiguration}
+                    """, returnStdout: true).trim()
+                    echo ocRollout
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,70 @@
+pipeline {
+    agent {   label 'jenkins-slave-fortify-linux'   }
+	environment {
+	    SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+	}
+    parameters { 
+	    string(defaultValue: "", description: '', name: 'projectKey')
+		string(defaultValue: "", description: '', name: 'requestby')
+		string(defaultValue: "", description: '', name: 'repositoryUri')
+		string(defaultValue: "", description: '', name: 'buildNumber')
+		string(defaultValue: "", description: '', name: 'buildname')
+        string(defaultValue: "", description: '', name: 'branchName')
+		string(defaultValue: "", description: '', name: 'folderSource')
+        string(defaultValue: "enable", description: '', name: 'fortify')
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+					def gitURL = env.repositoryUri.replace('https', 'ssh')
+                    git branch: "${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}" 
+                }
+            }
+        }
+		stage('Setup') {
+            steps {
+                script {
+                    def versionFile = sh(script: 'cat version', returnStdout: true).trim()
+                    def version = "${versionFile}${env.buildNumber}" 
+                    echo "Started job from TFS Build name: ${env.buildname}" 
+                    echo "New version: ${version}"
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                script {
+                    def sonarScanner = tool 'npm-sonar-scanner'				
+                    withSonarQubeEnv('sonarpine') {
+					    dir ("${env.folderSource}"){
+							def sonarScannerBin = "${sonarScanner}/sonar-scanner-3.3.0.1492/bin/sonar-scanner"
+							sh "rm -f package-lock.json"
+							sh "npm set strict-ssl false"
+							sh "npm config set registry http://artifactory.hml.pine.com/artifactory/api/npm/pine-npm/"
+							sh "npm config set proxy http://pineproxy03.pine.com.br:8080"
+							sh "npm install"
+							sh "npm run build"
+						}
+                    }
+                }
+            }
+        }
+        stage('Fortify') {
+            when {
+                expression { env.fortify == "enable" }
+            }
+            steps {
+                script {
+                    dir ("${env.folderSource}"){
+					    def FortifyHome = '/opt/Fortify/Fortify_SCA_and_Apps_18.20/bin/'
+					  		
+					    sh "\"${FortifyHome}sourceanalyzer\"  -b \"${env.buildname.toLowerCase()}\" \".\" -exclude \"node_modules\" "
+					    sh "\"${FortifyHome}sourceanalyzer\"  -b \"${env.buildname.toLowerCase()}\" -scan -Xmx3500M -f \"results.fpr\" "
+					    sh "\"${FortifyHome}fortifyclient\"  -url \"http://172.16.47.117:8080/ssc\" -authtoken \"7ce15431-e2da-4ea2-a199-6f7e85c15006\" uploadFPR -f \"results.fpr\" -project \"${env.buildname.toLowerCase()}\" -version \"${version}\" "
+                    }
+                }
+            }
+        }
+    }
+}

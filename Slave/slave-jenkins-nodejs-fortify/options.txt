@@ -1,0 +1,4 @@
+fortify_license_path=fortify.license
+InstallSamples=0
+UpdateProxyServer=pineproxy03.pine.com.br
+UpdateProxyPort=8080

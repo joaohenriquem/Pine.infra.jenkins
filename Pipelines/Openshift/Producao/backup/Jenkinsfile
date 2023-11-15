@@ -1,0 +1,342 @@
+def dcSelectDev, dcImageStreamDev, dcImageIDDev, dcSelectHml, dcImageStreamHml, dcImageIDHml, appNamespace, appNamespaceDev, goAhead, goAheadEnv
+pipeline {
+    agent {label 'jenkins-slave-image-mgmt'}
+	parameters {
+	    string(defaultValue: "teste", description: "Numero Gmud", name: 'Gmud')
+        string(defaultValue: "teste-cicd", description: "Projeto", name: 'namespace')
+        string(defaultValue: "apibureau", description: "Aplicacao", name: 'appname')
+        string(defaultValue: "1.0.5", description: "Tag", name: 'TagProd')
+    }
+    environment {
+	    appName = "${env.JOB_NAME}".split('/').last()
+		copyHml = "false"
+		deployedHml = "null"
+		aprovacao = "null"
+		HmlPublic = "false"
+		SVC_port_numberDev = "false"
+    }
+    stages {
+        stage('Check Last Version Dev') {
+            steps {
+                script {
+				    wrap([$class: 'ParentFolderBuildWrapper']) {
+						appNamespace = "${env.namespace}"
+						appNamespaceDev = "${appNamespace}-dev"
+					}
+                    openshift.withCluster() {
+                        openshift.withProject("${appNamespaceDev}") {
+                            if (openshift.selector( "dc/${appName}" ).exists() ) {
+							    
+                                //Select Deployment and Version
+                                dcSelectDev = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.from.name
+								dcVersionDev = "${dcSelectDev}".split(':').last()
+								dcVersionDev = dcVersionDev.substring(0,dcVersionDev.length() - 1)
+
+								//Select ImageStream Name
+								dcImageStreamDev = "${dcSelectDev}".split(':').first()
+								dcImageStreamDev = dcImageStreamDev.substring(1,dcImageStreamDev.length())
+								
+								//Select Current Image SHA
+								dcImageIDDev = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.lastTriggeredImage
+								dcImageIDDev = "${dcImageIDDev}".split('@').last()
+								dcImageIDDev = dcImageIDDev.substring(0,dcImageIDDev.length() - 1)
+								
+								SVC_port_numberDev = openshift.selector("svc","${appName}").object().spec.ports.port
+							    
+                            }
+                            else {
+                                currentBuild.result = 'ABORTED'
+								error('A aplicacao ${appName} nao foi encontrada no Openshift no Ambiente de Desenvolvimento')
+                            }
+                        }
+                    }
+                }
+            }
+        }
+		stage('Check Current Version Hml') {
+            steps {
+                script {
+                    openshift.withCluster() {
+                        openshift.withProject("${appNamespace}") {
+                            if (openshift.selector( "dc/${appName}" ).exists() ) {
+
+                                //Select Deployment and Version
+                                dcSelectHml = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.from.name
+								dcVersionHml = "${dcSelectHml}".split(':').last()
+								dcVersionHml = dcVersionHml.substring(0,dcVersionHml.length() - 1)
+
+								//Select ImageStream Name
+								dcImageStreamHml = "${dcSelectHml}".split(':').first()
+								dcImageStreamHml = dcImageStreamHml.substring(1,dcImageStreamHml.length())
+								
+								//Select Current Image SHA
+								dcImageIDHml = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.lastTriggeredImage
+								dcImageIDHml = "${dcImageIDHml}".split('@').last()
+								dcImageIDHml = dcImageIDHml.substring(0,dcImageIDHml.length() - 1)
+								
+                            }
+                            else {
+							    dcImageIDHml = 'nulo'
+                                echo "A aplicacao ${appName} nao foi encontrada no ambiente de Homologacao"
+								HmlPublic = "true"
+                                return
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stage('Approval of Configuration Manager') {
+            steps {
+                script {
+				    if (dcImageIDDev == dcImageIDHml && dcImageIDHml != 'nulo'){
+					    wrap([$class: 'ParentFolderBuildWrapper']) {
+                            echo "O Hash das imagens de Dev e Hml são iguais, ${dcImageIDDev}"
+						
+						    timeout(time: 1, unit: 'DAYS') {
+                                goAheadEnv = input(id: 'userInput', message: 'Deseja Atualizar somente as Variaveis?', submitter:"${env.aprovadores}",parameters: [
+                            [$class: 'BooleanParameterDefinition', defaultValue: true, description: 'As imagens de Dev e Hml são iguais, atualizar somente variaveis', name: 'Confirmo']])}
+					    }
+                    }
+					else{
+                        wrap([$class: 'ParentFolderBuildWrapper']) {
+							
+                            mail to: "${env.listemails}",
+                            from: "jenkins@pine.com",
+                            subject: "Aprovação Deploy HML - Aplicação ${appName} tag ",
+                            body: """Deploy da aplicação ${appName} tag  pendente de aprovação. ${env.JOB_URL}"""                                           
+                            
+                            timeout(time: 1, unit: 'DAYS') {
+                            goAhead = input(id: 'userInput', message: 'Aprova a implementacao em HML?', submitter:"${env.aprovadores}",parameters: [
+                            [$class: 'BooleanParameterDefinition', defaultValue: true, description: '', name: 'Confirmo']])}
+							
+							if (goAhead == true && goAheadEnv != true){
+								aprovacao = "true"
+								echo "aprovado"
+							}
+							else
+							{
+							    aprovacao = "false"
+								echo "nao aprovado"
+							}
+						}
+                    }
+                }
+            }
+        }
+		stage('Copy Image Hml') {
+		    when{
+                    expression {goAhead == true && goAheadEnv != true}
+                }
+            steps {
+                script {
+                    openshift.withCluster(){
+                        openshift.withProject("${appNamespace}"){
+                            echo "Tagging image Dev to HML"
+                            openshift.tag("${appNamespaceDev}/${dcImageStreamDev}:${dcVersionDev}","${appNamespace}/${dcImageStreamDev}:${dcVersionDev}")							
+							copyHml="true"
+                        }
+                    }                 
+                }
+			}
+        }
+        stage('Deploy First Time Hml') {
+		    when{
+                    expression {HmlPublic == "true" && copyHml == "true"}
+                }
+            steps {
+                script {
+                    openshift.withCluster(){
+                        openshift.withProject("${appNamespaceDev}"){
+							dcDev = openshift.selector('dc',"${appName}").object(exportable:true)
+							svcDev = openshift.selector('svc',"${appName}").object(exportable:true)
+						}
+						openshift.withProject("${appNamespace}"){
+						    dcHml = openshift.selector('dc',"${appName}")
+							openshift.apply( dcDev )
+							openshift.create( svcDev ).expose("--hostname=${appName}.hml.pine.com")
+							openshift.set("triggers","dc/${appName}","--remove-all")
+                            openshift.set("triggers","dc/${appName}","--from-image=${appNamespace}/${dcImageStreamDev}:${dcVersionDev}","-c ${appName}")
+							
+                            def rm = dcHml.rollout()
+							rm.pause()
+							
+							dcEnvSelect = sh (
+                                script: """
+								    oc set env dc/${appName} ${EnvApply} -n ${appNamespace} --overwrite=true
+							    """,
+                            returnStdout: true).trim()
+							
+							rm.resume()
+							rm.latest()
+							
+							deployedHml = "ok"	
+                        }
+                    }
+                }
+            }
+        }
+		stage('Update Hml') {
+		    when{
+                    expression {HmlPublic == "false" && copyHml == "true"}
+                }
+            steps {
+                script {
+                    openshift.withCluster(){
+                        openshift.withProject("${appNamespace}"){
+						    dcHml = openshift.selector('dc',"${appName}")
+                            openshift.set("triggers","dc/${appName}","--remove-all")
+                            openshift.set("triggers","dc/${appName}","--from-image=${appNamespace}/${dcImageStreamDev}:${dcVersionDev}","-c ${appName}")
+	                            
+							dcEnvSelect = sh (
+                                script: """
+								    oc set env dc/${appName} --list -n ${appNamespaceDev} | sed "1 d" |tr '\n' ' '
+							    """,
+                            returnStdout: true).trim()
+								
+							EnvApply = input(
+                                message: "Atualizar Variaveis de Ambiente para Hml",
+                                parameters: [ [$class: 'TextParameterDefinition', defaultValue: """${dcEnvSelect}""",
+                                description: '',
+                                name: 'Variaveis'
+                            ]])
+							
+                            def rm = dcHml.rollout()
+							rm.pause()
+							
+							dcEnvSelect = sh (
+                                script: """
+								    oc set env dc/${appName} ${EnvApply} -n ${appNamespace} --overwrite=true
+							    """,
+                            returnStdout: true).trim()
+							
+							rm.resume()
+							rm.latest()
+							
+							def SVC_port_numberHml = openshift.selector("svc","${appName}").object().spec.ports.port
+							
+						    if (SVC_port_numberHml.toString() != "[8080]" && SVC_port_numberDev.toString() == "[8080]"){
+		                        UpdateSVCName = sh (
+                                    script: """
+								        oc patch svc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/name", "value":8080-tcp}]' -n ${appNamespace}
+							        """,
+                                returnStdout: true).trim() 
+								            
+								UpdateSVCnumber = sh (
+                                    script: """
+								        oc patch svc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/port", "value":8080}]' -n ${appNamespace}
+							        """,
+                                returnStdout: true).trim() 
+								            
+								UpdateSVCtarget = sh (
+                                    script: """
+								        oc patch svc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/targetPort", "value":8080}]' -n ${appNamespace}
+							        """,
+                                returnStdout: true).trim()
+											
+								UpdateDCPort = sh (
+                                    script: """
+								        oc patch dc ${appName} --type=json -p '[{"op": "replace", "path": "/spec/template/spec/containers/0/ports/0/containerPort", "value":8080}]' -n ${appNamespace}
+							        """,
+                                returnStdout: true).trim()
+											
+								UpdateSVCroute = sh (
+                                    script: """
+								        oc patch route ${appName} -p '{"spec":{"port":{"targetPort":"8080-tcp"}}}' -n ${appNamespace}
+							        """,
+                                returnStdout: true).trim()
+							}
+							
+                            deployedHml = "ok"
+                        }
+                    }
+                }
+            }
+        }
+		stage('Update Environment Hml') {
+		    when{
+                    expression {HmlPublic == "false" && copyHml == "false" && goAheadEnv == true}
+                }
+            steps {
+                script {
+                    openshift.withCluster(){
+                        openshift.withProject("${appNamespace}"){
+						    dcHml = openshift.selector('dc',"${appName}")
+	                            
+							dcEnvSelect = sh (
+                                script: """
+								    oc set env dc/${appName} --list -n ${appNamespace} | sed "1 d" |tr '\n' ' '
+							    """,
+                            returnStdout: true).trim()
+								
+							EnvApply = input(
+                                message: "Atualizar Variaveis de Ambiente para Hml",
+                                parameters: [ [$class: 'TextParameterDefinition', defaultValue: """${dcEnvSelect}""",
+                                description: '',
+                                name: 'Variaveis'
+                            ]])
+							
+                            def rm = dcHml.rollout()
+							rm.pause()
+							
+							dcEnvSelect = sh (
+                                script: """
+								    oc set env dc/${appName} ${EnvApply} -n ${appNamespace} --overwrite=true
+							    """,
+                            returnStdout: true).trim()
+							
+							rm.resume()
+							rm.latest()
+							
+							deployedHml = "ok"
+                        }
+                    }
+                }
+            }
+        }
+        stage('Check deploy') {
+            steps {
+                script {
+                    openshift.withCluster(){
+                        openshift.withProject("${appNamespace}"){
+                            if (deployedHml == "ok") {
+							    latestDeploymentVersion = openshift.selector('dc',"${appName}").object().status.latestVersion
+                                rc = openshift.selector('rc', "${appName}-${latestDeploymentVersion}")
+                                rc.untilEach(1){
+                                    rcMap = it.object()
+                                    return (rcMap.status.replicas.equals(rcMap.status.readyReplicas))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            post {
+                success {
+                    script {
+                        if (deployedHml == "ok") {
+		    		        wrap([$class: 'ParentFolderBuildWrapper']) {	
+                                mail to: "${env.listemails}",
+                                from: "jenkins@pine.com",
+                                subject: "Aplicação ${appName} - Hml",
+                                body: "Implementacao ou Atualizacao da aplicação ${appName} realizado com sucesso"
+		    			    }
+                        }
+                    }
+                }
+                failure {
+                    script {
+                        if (deployedHml != "ok") {
+		    		        wrap([$class: 'ParentFolderBuildWrapper']) {	
+                                mail to: "${env.listemails}",
+                                from: "jenkins@pine.com",
+                                subject: "Aplicação ${appName} - Hml",
+                                body: "Erro no Deploy da aplicação ${appName} "
+                            }
+                        }
+                    }
+                }
+            }		
+        } 
+    }
+}

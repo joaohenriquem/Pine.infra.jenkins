@@ -1,0 +1,657 @@
+import java.text.SimpleDateFormat
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, version, versionFile, versionBuild, passarSonar, currentversion
+pipeline {
+    agent { 
+        label 'jenkins-slave-dotnet-31'
+    }
+	environment {
+	    SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+		repoName = "npm-artifacts"
+		ARTIFACTORYURL = "https://artifactory.hml.pine.com/artifactory"
+		ARTIFACTORYUSER = "svc135"
+		ArtifactoryTokenCred = credentials('ArtifactoryToken')
+	}
+    parameters {
+	    string(defaultValue: "", description: '', name: 'projectKey') 
+		string(defaultValue: "", description: '', name: 'requestby')
+		string(defaultValue: "", description: '', name: 'repositoryUri')
+		string(defaultValue: "", description: '', name: 'buildNumber')
+        string(defaultValue: "", description: '', name: 'branchName')
+		string(defaultValue: "", description: '', name: 'commit')
+		string(defaultValue: "", description: '', name: 'projectName')
+		string(defaultValue: "", description: '', name: 'imagename')
+        string(defaultValue: "", description: '', name: 'solutionFile')
+        string(defaultValue: "", description: '', name: 'buildFile')
+		string(defaultValue: "", description: '', name: 'buildname')
+        string(defaultValue: "enabled", description: '', name: 'sonarqubeStatus')
+        string(defaultValue: "enabled", description: '', name: 'fortifyStatus')
+		string(defaultValue: "", description: '', name: 'sonar_dt_limet_disable')
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                script {		        
+                    openshift.withCluster() {
+					    openshift.withProject( "cicd" ) {
+						    BC_JobName = "ci-${env.buildname.toLowerCase()}"
+							BC_JobName_Dev = "${BC_JobName}-dev"
+							BC_JobName_Hml = "${BC_JobName}-hml"
+							
+							def gitURL = env.repositoryUri.replace('https', 'ssh')
+							if (env.branchName.startsWith('release') && openshift.selector("bc/${BC_JobName_Hml}").exists())
+							{
+								echo "BUILD HML"
+					            def currentsource = openshift.selector("bc","${BC_JobName_Hml}").object().spec.source.git.ref
+					            def newsource = "${env.commit}"							
+					            if (currentsource == newsource){
+						            buildPatch = "nopatch"
+					            }
+								
+								currentversion = openshift.selector("bc","${BC_JobName_Hml}").object().spec.strategy.sourceStrategy.from.name
+								if (currentversion != "dotnet:3.1"){
+									openshift.patch("bc/${BC_JobName_Hml}",'\'{"spec":{"strategy":{"sourceStrategy":{"from":{"name":"'+"dotnet:3.1"+'"}}}}}\'')
+								}
+
+								git branch: "Release/${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+							}
+							else if (openshift.selector("bc/${BC_JobName_Dev}").exists()) {
+								echo "BUILD DEV"
+					            def currentsource = openshift.selector("bc","${BC_JobName_Dev}").object().spec.source.git.ref
+					            def newsource = "${env.commit}"							
+					            if (currentsource == newsource){
+						            buildPatch = "nopatch"
+					            }
+								
+								currentversion = openshift.selector("bc","${BC_JobName_Dev}").object().spec.strategy.sourceStrategy.from.name
+								if (currentversion != "dotnet:3.1" ){
+									openshift.patch("bc/${BC_JobName_Dev}",'\'{"spec":{"strategy":{"sourceStrategy":{"from":{"name":"'+"dotnet:3.1"+'"}}}}}\'')
+								}
+
+								git branch: "${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+							}
+						}
+					}
+                }
+            }
+        }
+        stage('Setup') {
+            steps {
+                script {
+				    if (fileExists ('version')){
+                        versionFile = sh(script: 'cat version', returnStdout: true).trim()
+                        version = "${versionFile}${env.buildNumber}"
+						versionBuild = "${versionFile.replace("-", "")}"
+						echo "${versionFile}"
+					}
+					else
+					{
+						def defaultVersion = "1.0."
+						version = "${defaultVersion}${env.buildNumber}"
+						versionBuild = "${defaultVersion}"
+					}
+
+                    echo "Started job from TFS Build name: ${env.buildname}" 
+                    echo "New version: ${version}"
+                }
+            }
+        }
+         stage('Code Check') {
+              parallel {
+                  stage('Sonarqube') {
+                     when {
+                         expression { env.sonarqubeStatus == 'enabled' }
+                     }
+                     steps {
+                         script {
+		 				    def sonarScanner = tool 'dotnet-sonar-scanner-31'
+                             withSonarQubeEnv('sonarpine') {
+								
+		 						//Code Check Sonarqube
+		 						def sonarScannerBin = "${sonarScanner}/SonarScanner.MSBuild.dll"
+		 					    sh "dotnet restore ${env.solutionFile} -s https://artifactory.hml.pine.com/artifactory/api/nuget/pine-nuget"
+		 						sh "dotnet ${sonarScannerBin} begin /k:\"${env.projectKey}\" /n:\"${env.projectKey}\" /v:\"${env.buildNumber}\" /d:sonar.host.url=\"${SONAR_HOST_URL}\" /d:sonar.sourceEncoding=UTF-8"
+		 						sh "dotnet build ${env.solutionFile} --configuration Release --source https://artifactory.hml.pine.com/artifactory/api/nuget/pine-nuget"
+		 						sh "dotnet ${sonarScannerBin} end"
+								
+		 						//Sonarqube Sempre true
+		 						passarSonar = true 
+
+		 						if(sonar_dt_limet_disable != null && sonar_dt_limet_disable != ""){
+
+		 							def format = new SimpleDateFormat("dd-MM-yyyy") 
+		 							def dateDisable = format.parse(sonar_dt_limet_disable ) 
+
+		 							def date = new Date()
+		 							if(dateDisable > date ){
+		 								passarSonar = false
+		 							}
+		 						}
+		 					}
+							
+		 					//Check quality gate Result
+		 					def qualityGateResult = null
+		 					timeout(time: 30, unit: 'MINUTES') {
+		 						qualityGateResult = waitForQualityGate()
+		 					}
+							
+		 					if(passarSonar){
+		 						if(qualityGateResult.status == 'OK') {
+		 							echo "Sonar quality gateway - Projeto passou no teste de qualidade!"
+		 						} 
+		 						else {
+		 							error "Sonar quality gateway - Projeto nao passou no teste de qualidade do Sonarqube!"
+		 						}
+		 					}
+							
+		 					if(!passarSonar){
+		 						echo "Sonar quality gateway - Codigo foi analisado pelo Sonarqube porem sera ignorado o resultado ate ${sonar_dt_limet_disable}"
+		 					}
+                         }
+                     }
+                 }
+
+		 		stage('Fortify') {
+                     when {
+                         expression { env.fortifyStatus != 'skip' }
+                     }
+                     steps {
+                         script {
+		 					def buildFortify = build job: 'EntregaContinua-Dotnet-Fortify', 
+		 						parameters: [
+		 						[$class: 'StringParameterValue', name: 'projectKey', value: "${projectKey}"], 
+		 						[$class: 'StringParameterValue', name: 'requestby', value: "${requestby}"],
+		 						[$class: 'StringParameterValue', name: 'repositoryUri', value: "${repositoryUri}"],
+		 						[$class: 'StringParameterValue', name: 'buildNumber', value: "${buildNumber}"],
+		 						[$class: 'StringParameterValue', name: 'branchName', value: "${branchName}"],
+		 						[$class: 'StringParameterValue', name: 'buildname', value: "${buildname}"],
+		 						[$class: 'StringParameterValue', name: 'solutionFile', value: "${solutionFile}"]
+		 						], wait: true, propagate: true
+                         }
+                     }
+                  }
+           
+              }
+         }
+		stage('Upload Artifactory') {
+            steps {
+                script {
+
+								//Code Check Sonarqube
+							    sh "dotnet restore ${env.solutionFile} -s https://artifactory.hml.pine.com/artifactory/api/nuget/pine-nuget"
+								sh "dotnet build ${env.solutionFile} --configuration Release --source https://artifactory.hml.pine.com/artifactory/api/nuget/pine-nuget"
+
+					sh "dotnet publish ${env.solutionFile} --configuration Release --output app/publish"
+
+					// -r linux-x64
+
+					zip zipFile: "${env.projectKey}-${versionBuild}${env.buildNumber}.zip", archive: false, dir: 'app/'
+
+					sh "ls"
+
+					//dir ("publish"){
+						if (fileExists ("${env.projectKey}-${versionBuild}${env.buildNumber}.zip")){
+
+							// Obtain an Artifactory server instance
+							def server = Artifactory.server "artfactoryserver"
+							
+							def buildInfo = Artifactory.newBuildInfo()
+							// Set custom build name and number.
+							buildInfo.setName "${env.projectKey}"
+							buildInfo.setNumber "${versionBuild}${env.buildNumber}"
+							
+							// define the upload spec
+							def uploadSpec = """{
+							"files": [
+								{
+								"pattern": "${env.projectKey}-${versionBuild}${env.buildNumber}.zip",
+								"regexp": "true",
+								"target": "${repoName}/${env.projectKey}/",
+								"flat": "false",
+								"recursive": "true"
+								}
+							]
+							}"""
+							
+							// Upload to Artifactory.
+							def buildUpload = server.upload spec: uploadSpec, buildInfo: buildInfo
+							
+							// Publish the build to Artifactory
+							server.publishBuildInfo buildInfo
+						}
+					//}
+				}
+			}
+		}
+        stage('Publish Dev') {
+            when {
+                expression { env.branchName.startsWith('Desenvolvimento') || env.branchName.startsWith('desenvolvimento') }
+            }
+            steps {
+                script {
+                    openshift.withCluster() {
+					    openshift.withProject( "cicd" ) {
+					        echo "Publish branch ${env.branchName}"
+                            version = "${versionBuild}${env.buildNumber}"
+							BC_JobName = "ci-digital-pineonline-api-ci-nova-dev"
+							def DC_Name = "${env.imagename.toLowerCase()}"
+							DC_Name1="${DC_Name.replace(".", "")}"
+							DC_Name2="pineonline-webapi"
+							
+							if (!openshift.selector( "bc/${BC_JobName}" ).exists() ) {
+							    def imageStrTag = "${env.imagename.toLowerCase()}:${version}"
+								def gitURLBuild = env.repositoryUri.replace('https://', 'ssh://svc135@')
+								
+								openshift.withProject( "${env.projectName}-dev" ) {
+                                    def imageStr = "${env.imagename.toLowerCase()}"							
+						            if (!openshift.selector("is/${imageStr}").exists()) {
+									openshift.create("imagestream","${imageStr}")
+									}
+								}
+								openshift.withProject( "cicd" ) {
+									openshift.create(openshift.process("dotnetcore-pine-dev-3-1","-p=NAME=${BC_JobName}","-p=IMAGESTREAM=${env.imagename}:${version}","-p=NAMESPACE=${env.projectName}","-p=BRANCHNAME=${env.commit}","-p=GITURLBUILD=${gitURLBuild}","-p=SOLUTIONFILE=${env.buildFile}"))
+									def builds = openshift.selector("bc/${BC_JobName}").related('builds')
+									timeout(5) { 
+										builds.untilEach(1) {
+											return (it.object().status.phase == "Complete")
+										}
+									}
+								}
+							}
+							else
+							{
+								// if (buildPatch != "nopatch" ){
+								// 	openshift.withProject( "cicd" ) {
+								// 		openshift.patch("bc/${BC_JobName}",'\'{"spec":{"output":{"to":{"name":"'+"${env.imagename}:${version}"+'"}}}}\'')
+								// 		openshift.patch("bc/${BC_JobName}",'\'{"spec":{"source":{"git":{"ref":"'+"${env.commit}"+'"}}}}\'')
+								// 		def StartBuild = openshift.selector("bc/${BC_JobName}").startBuild("--wait","--follow")
+                                //         echo "${StartBuild}"
+								// 	}
+								// }
+								// else{
+								//     openshift.patch("bc/${BC_JobName}",'\'{"spec":{"output":{"to":{"name":"'+"${env.imagename}:${version}"+'"}}}}\'')
+								// 	def StartBuild = openshift.selector("bc/${BC_JobName}").startBuild("--wait","--follow")
+								// 	echo "${StartBuild}"
+								// }
+								echo "BuildConfig ja existe no Openshift"
+									openshift.withProject( "cicd" ) {
+										openshift.patch("bc/${BC_JobName}",'\'{"spec":{"output":{"to":{"name":"'+"${env.imagename}:${version}"+'"}}}}\'')
+								    dir ("."){
+										//Runtime Image
+										StartBuildOutput = openshift.selector("bc/${BC_JobName}").startBuild("--from-dir=./${env.projectKey}-${version}.zip","--follow")
+										buildOutput = openshift.selector("bc/${BC_JobName}").related('builds')
+										echo "${StartBuildOutput}"
+									}
+								}
+							}	
+                            
+							openshift.withProject( "${env.projectName}-dev" ) {							
+									if (openshift.selector( "dc/${DC_Name1}" ).exists()) {
+										DC_Name = "${DC_Name1}"
+									}
+									if (openshift.selector( "dc/${DC_Name2}" ).exists()) {
+										DC_Name = "${DC_Name2}"
+									}
+									if (openshift.selector( "dc/${DC_Name}" ).exists())  {
+										openshift.set("triggers","dc/${DC_Name}","--remove-all")
+                                        
+										//Definindo o caminho do arquivo Launch Settings - Inicio -->
+										    json_path = "${env.buildFile}".split('/')
+										    String res = "";
+                                            for(int i = 0 ; i < json_path.length - 1; i++ )
+                                            {
+                                                res += json_path[i] + "/"
+                                            }
+                                            json_path = res
+											
+											if (fileExists ("${json_path}Properties/launchSettings.json")){
+												sh "iconv -t UTF-8//IGNORE --output=\'${json_path}Properties/launchSettings-utf8.json\' \'${json_path}Properties/launchSettings.json\'"
+										        def json_file = readJSON file: "${json_path}Properties/launchSettings-utf8.json"
+												//Definindo o caminho do arquivo Launch Settings - Fim <--
+										
+												//Aplicando variaveis de ambiente em DEV - Inicio -->
+												def json_variables = json_file.profiles.Development.environmentVariables
+					                        
+												json_variables.eachWithIndex { 
+													envVarItem, i ->    
+														dcEnvSelect = sh (
+															script: """
+																oc set env dc/${DC_Name} \'${envVarItem.key}\'=\'${envVarItem.value}\' -n ${env.projectName}-dev --overwrite=true
+															""",
+														returnStdout: true).trim()
+												}
+
+												dcEnvSelect = sh (
+													script: """
+													oc set env dc/${DC_Name} \'BUILD_VERSION\'=\'${versionFile}${env.buildNumber}\' -n ${env.projectName}-dev --overwrite=true
+													""",
+												returnStdout: true).trim()
+
+												//Aplicando variaveis de ambiente em DEV -  - Fim <--
+											}
+											else
+											{
+												echo "Arquivo LaunchSettings nao encontrado - Nao sera aplicado variaveis de Ambiente"
+											}
+										
+											//Aplicando nova versao de container em DEV - Inicio -->
+										    openshift.set("triggers","dc/${DC_Name}","--from-image=${env.projectName}-dev/${env.imagename}:${version}","-c ${DC_Name}","--manual=true")
+										    dcDev = openshift.selector('dc',"${DC_Name}")
+											def rm = dcDev.rollout()
+											//Aplicando nova versao de container em DEV -  - Fim <--
+										
+											//Validacao de porta do container em DEV - Inicio -->
+										    def SVC_port_number = openshift.selector("svc","${DC_Name}").object().spec.ports.port
+							
+							                if (SVC_port_number.toString() != "[8080]"){
+							                    UpdateSVCName = sh (
+                                                script: """
+								                oc patch svc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/name", "value":8080-tcp}]' -n ${env.projectName}-dev
+							                    """,
+                                                returnStdout: true).trim() 
+								                
+								                UpdateSVCnumber = sh (
+                                                script: """
+								                    oc patch svc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/port", "value":8080}]' -n ${env.projectName}-dev
+							                    """,
+                                                returnStdout: true).trim() 
+								                
+								                UpdateSVCtarget = sh (
+                                                script: """
+								                    oc patch svc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/targetPort", "value":8080}]' -n ${env.projectName}-dev
+							                    """,
+                                                returnStdout: true).trim()
+										    	
+										    	UpdateDCPort = sh (
+                                                script: """
+								                    oc patch dc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/template/spec/containers/0/ports/0/containerPort", "value":8080}]' -n ${env.projectName}-dev
+							                    """,
+                                                returnStdout: true).trim()
+										    	
+								                UpdateSVCroute = sh (
+                                                script: """
+								                    oc patch route ${DC_Name} -p '{"spec":{"port":{"targetPort":"8080-tcp"}}}' -n ${env.projectName}-dev
+							                    """,
+                                                returnStdout: true).trim()
+												
+												//Aplicando Deploy em DEV - Inicio -->
+										        
+										        //Aplicando Deploy em DEV - Fim <--
+										    }
+											
+											rm.latest()	
+											//Validacao de porta do container em DEV - Fim <--
+									}
+									else {
+										def imagestream="${env.imagename}:${version}"
+										openshift.newApp("${imagestream}","--name=${DC_Name2}").narrow('svc').expose("--hostname=${DC_Name1}.dev.pine.com")
+										
+                                        //Definindo o caminho do arquivo Launch Settings - Inicio -->
+										    json_path = "${env.buildFile}".split('/')
+										    String res = "";
+                                            for(int i = 0 ; i < json_path.length - 1; i++ )
+                                            {
+                                                res += json_path[i] + "/"
+                                            }
+                                            json_path = res
+											
+											if (fileExists ("${json_path}Properties/launchSettings.json")){
+												sh "iconv -t UTF-8//IGNORE --output=\'${json_path}Properties/launchSettings-utf8.json\' \'${json_path}Properties/launchSettings.json\'"
+										        def json_file = readJSON file: "${json_path}Properties/launchSettings-utf8.json"
+												//Definindo o caminho do arquivo Launch Settings - Fim <--
+                                        
+												//Aplicando variaveis de ambiente em DEV - Inicio -->
+												def json_variables = json_file.profiles.Development.environmentVariables
+					                        
+												json_variables.eachWithIndex { 
+													envVarItem, i ->    
+														dcEnvSelect = sh (
+															script: """
+																oc set env dc/${DC_Name} \'${envVarItem.key}\'=\'${envVarItem.value}\' -n ${env.projectName}-dev --overwrite=true
+															""",
+														returnStdout: true).trim()
+												}
+												
+												dcEnvSelect = sh (
+													script: """
+													oc set env dc/${DC_Name} \'BUILD_VERSION\'=\'${versionFile}${env.buildNumber}\' -n ${env.projectName}-dev --overwrite=true
+													""",
+												returnStdout: true).trim()
+
+												//Aplicando Deploy em DEV - Inicio -->
+										        dcDev = openshift.selector('dc',"${DC_Name}")
+									            def rm = dcDev.rollout()
+									            rm.latest()
+											    //Aplicando Deploy em DEV - Fim <--
+												
+											  //Aplicando variaveis de ambiente em DEV -  - Fim <--
+										    }
+											else
+											{
+												echo "Arquivo LaunchSettings nao encontrado - Nao sera aplicado variaveis de Ambiente"
+											}
+											
+
+									}
+						    }
+                        }
+                    }       
+                }
+            }
+        }
+		stage('Publish Hml') {
+            when {
+                expression { env.branchName.startsWith('Release') || env.branchName.startsWith('release') }
+            }
+            steps {
+                script {
+                    openshift.withCluster() {
+					    openshift.withProject( "cicd" ) {
+					        echo "Publish branch ${env.branchName}"
+                            version = "${versionBuild}${env.buildNumber}"
+							BC_JobName = "ci-digital-pineonline-api-ci-nova-hml" //BC_JobName_Hml
+							def DC_Name = "${env.imagename.toLowerCase()}"
+							DC_Name1="${DC_Name.replace(".", "")}"
+							DC_Name2="${DC_Name.replace(".", "-")}"
+							
+							if (!openshift.selector( "bc/${BC_JobName}" ).exists() ) {
+							    def imageStrTag = "${env.imagename.toLowerCase()}:${version}"
+								def gitURLBuild = env.repositoryUri.replace('https://', 'ssh://svc135@')
+								
+								openshift.withProject( "${env.projectName}" ) {
+                                    def imageStr = "${env.imagename.toLowerCase()}"							
+						            if (!openshift.selector("is/${imageStr}").exists()) {
+									openshift.create("imagestream","${imageStr}")
+									}
+								}
+								openshift.withProject( "cicd" ) {
+									openshift.create(openshift.process("dotnetcore-pine-hml-3-1","-p=NAME=${BC_JobName}","-p=IMAGESTREAM=${env.imagename}:${version}","-p=NAMESPACE=${env.projectName}","-p=BRANCHNAME=${env.commit}","-p=GITURLBUILD=${gitURLBuild}","-p=SOLUTIONFILE=${env.buildFile}"))
+									def builds = openshift.selector("bc/${BC_JobName}").related('builds')
+									timeout(5) { 
+										builds.untilEach(1) {
+											return (it.object().status.phase == "Complete")
+										}
+									}
+								}
+							}
+							else
+							{
+								// if (buildPatch != "nopatch" ){
+								// 	openshift.withProject( "cicd" ) {
+								// 		openshift.patch("bc/${BC_JobName}",'\'{"spec":{"output":{"to":{"name":"'+"${env.imagename}:${version}"+'"}}}}\'')
+								// 		openshift.patch("bc/${BC_JobName}",'\'{"spec":{"source":{"git":{"ref":"'+"${env.commit}"+'"}}}}\'')
+								// 		def StartBuild = openshift.selector("bc/${BC_JobName}").startBuild("--wait","--follow")
+                                //        echo "${StartBuild}"
+								// 	}
+								// }
+								// else{
+								//     openshift.patch("bc/${BC_JobName}",'\'{"spec":{"output":{"to":{"name":"'+"${env.imagename}:${version}"+'"}}}}\'')
+								// 	def StartBuild = openshift.selector("bc/${BC_JobName}").startBuild("--wait","--follow")
+								// 	echo "${StartBuild}"
+								// }
+								echo "BuildConfig ja existe no Openshift"
+									openshift.withProject( "cicd" ) {
+										openshift.patch("bc/${BC_JobName}",'\'{"spec":{"output":{"to":{"name":"'+"${env.imagename}:${version}"+'"}}}}\'')
+								    dir ("."){
+										//Runtime Image
+										StartBuildOutput = openshift.selector("bc/${BC_JobName}").startBuild("--from-dir=./${env.projectKey}-${version}.zip","--follow")
+										buildOutput = openshift.selector("bc/${BC_JobName}").related('builds')
+										echo "${StartBuildOutput}"
+									}
+								}
+							}	
+                            
+							openshift.withProject( "${env.projectName}" ) {							
+									if (openshift.selector( "dc/${DC_Name1}" ).exists()) {
+										DC_Name = "${DC_Name1}"
+									}
+									if (openshift.selector( "dc/${DC_Name2}" ).exists()) {
+										DC_Name = "${DC_Name2}"
+									}
+									if (openshift.selector( "dc/${DC_Name}" ).exists())  {
+										
+										//Remove triggers - Inicio -->
+											openshift.set("triggers","dc/${DC_Name}","--remove-all")
+										//Remove triggers - Fim <--
+										
+										//Definindo o caminho do arquivo Launch Settings - Inicio -->
+										    json_path = "${env.buildFile}".split('/')
+										    String res = "";
+                                            for(int i = 0 ; i < json_path.length - 1; i++ )
+                                            {
+                                                res += json_path[i] + "/"
+                                            }
+                                            json_path = res
+											
+											if (fileExists ("${json_path}Properties/launchSettings.json")){
+												sh "iconv -t UTF-8//IGNORE --output=\'${json_path}Properties/launchSettings-utf8.json\' \'${json_path}Properties/launchSettings.json\'"
+										        def json_file = readJSON file: "${json_path}Properties/launchSettings-utf8.json"
+												//Definindo o caminho do arquivo Launch Settings - Fim <--
+										
+												//Aplicando variaveis de ambiente em HML - Inicio -->
+												def json_variables = json_file.profiles.Staging.environmentVariables
+					                        
+												json_variables.eachWithIndex { 
+													envVarItem, i ->    
+														dcEnvSelect = sh (
+															script: """
+																oc set env dc/${DC_Name} \'${envVarItem.key}\'=\'${envVarItem.value}\' -n ${env.projectName} --overwrite=true
+															""",
+														returnStdout: true).trim()
+												}
+
+												dcEnvSelect = sh (
+													script: """
+													oc set env dc/${DC_Name} \'BUILD_VERSION\'=\'${versionFile}${env.buildNumber}\' -n ${env.projectName} --overwrite=true
+													""",
+												returnStdout: true).trim()
+
+												//Aplicando variaveis de ambiente em HML -  - Fim <--
+											}
+											else
+											{
+												echo "Arquivo LaunchSettings nao encontrado - Nao sera aplicado variaveis de Ambiente"
+											}
+										
+										//Aplicando nova versao de container em HML - Inicio -->
+										    openshift.set("triggers","dc/${DC_Name}","--from-image=${env.projectName}/${env.imagename}:${version}","-c ${DC_Name}","--manual=true")
+										    dcHml = openshift.selector('dc',"${DC_Name}")
+											def rm = dcHml.rollout()
+										//Aplicando nova versao de container em HML -  - Fim <--
+										
+										//Validacao de porta do container em HML - Inicio -->
+										    def SVC_port_number = openshift.selector("svc","${DC_Name}").object().spec.ports.port
+							            
+							                if (SVC_port_number.toString() != "[8080]"){
+							                    UpdateSVCName = sh (
+                                                script: """
+								                oc patch svc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/name", "value":8080-tcp}]' -n ${env.projectName}
+							                    """,
+                                                returnStdout: true).trim() 
+								                
+								                UpdateSVCnumber = sh (
+                                                script: """
+								                    oc patch svc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/port", "value":8080}]' -n ${env.projectName}
+							                    """,
+                                                returnStdout: true).trim() 
+								                
+								                UpdateSVCtarget = sh (
+                                                script: """
+								                    oc patch svc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/ports/0/targetPort", "value":8080}]' -n ${env.projectName}
+							                    """,
+                                                returnStdout: true).trim()
+										    	
+										    	UpdateDCPort = sh (
+                                                script: """
+								                    oc patch dc ${DC_Name} --type=json -p '[{"op": "replace", "path": "/spec/template/spec/containers/0/ports/0/containerPort", "value":8080}]' -n ${env.projectName}
+							                    """,
+                                                returnStdout: true).trim()
+										    	
+								                UpdateSVCroute = sh (
+                                                script: """
+								                    oc patch route ${DC_Name} -p '{"spec":{"port":{"targetPort":"8080-tcp"}}}' -n ${env.projectName}
+							                    """,
+                                                returnStdout: true).trim()
+												
+												
+										    }
+										    
+											rm.latest()
+
+									}
+									else {
+										def imagestream="${env.imagename}:${version}"
+										openshift.newApp("${imagestream}","--name=${DC_Name2}").narrow('svc').expose("--hostname=${DC_Name1}.hml.pine.com")
+										
+                                        //Definindo o caminho do arquivo Launch Settings - Inicio -->
+										    json_path = "${env.buildFile}".split('/')
+										    String res = "";
+                                            for(int i = 0 ; i < json_path.length - 1; i++ )
+                                            {
+                                                res += json_path[i] + "/"
+                                            }
+                                            json_path = res
+											
+											if (fileExists ("${json_path}Properties/launchSettings.json")){
+												sh "iconv -t UTF-8//IGNORE --output=\'${json_path}Properties/launchSettings-utf8.json\' \'${json_path}Properties/launchSettings.json\'"
+										        def json_file = readJSON file: "${json_path}Properties/launchSettings.json"
+												//Definindo o caminho do arquivo Launch Settings - Fim <--
+                                        
+												//Aplicando variaveis de ambiente em DEV - Inicio -->
+												def json_variables = json_file.profiles.Staging.environmentVariables
+					                        
+												json_variables.eachWithIndex { 
+													envVarItem, i ->    
+														dcEnvSelect = sh (
+															script: """
+																oc set env dc/${DC_Name} \'${envVarItem.key}\'=\'${envVarItem.value}\' -n ${env.projectName} --overwrite=true
+															""",
+														returnStdout: true).trim()
+												}
+
+												dcEnvSelect = sh (
+													script: """
+													oc set env dc/${DC_Name} \'BUILD_VERSION\'=\'${versionFile}${env.buildNumber}\' -n ${env.projectName} --overwrite=true
+													""",
+												returnStdout: true).trim()
+
+												//Aplicando variaveis de ambiente em DEV -  - Fim <--
+										    }
+											else
+											{
+												echo "Arquivo LaunchSettings nao encontrado - Nao sera aplicado variaveis de Ambiente"
+											}
+											
+											//Aplicando Deploy em DEV - Inicio -->
+										    dcHml = openshift.selector('dc',"${DC_Name}")
+									        def rm = dcHml.rollout()
+									        rm.latest()
+											//Aplicando Deploy em DEV - Fim <--
+									}
+						    }
+                        }
+                    }       
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,105 @@
+pipeline {
+    agent any
+        environment {
+            gitRepo = "https://tfs.pine.com/DefaultCollection/TI%20Pine/_git/PineOnline.Documentos.WebAPI"
+            workPath = "E:/JenkinsBuilds/${env.JOB_NAME}"
+            pulishPath = "E:/JenkinsBuilds/${env.JOB_NAME}/publish"
+            publishprofile = "Pine.Documentos.WebApi"
+            archivePath = "${pulishPath}/_PublishedWebsites/" 
+            artifactPath = "generic-local"
+            serverHost = "pinedevweb01"
+            winsetcred = 'null'
+            SrvPassword = 'null'
+            sessionWin = 'null'
+            copyartifacts = 'null'
+            deployPath = "${archivePath}${publishprofile}"
+            applicationServerPath = "E:/sistemas/"
+            filenameZip = "${publishprofile}.zip"
+            filePathZip = "${applicationServerPath}deployteste/${filenameZip}"
+        }
+        stages {
+            stage('Clone Source') {
+                steps {
+                    dir ("${workPath}"){
+                        script {  
+                            git branch: 'project-onboarding', credentialsId: 'jenkinstotfs', url: "${gitRepo}"
+                        }
+                    }
+                }
+            }
+            stage('Build and Publish') {
+                steps {
+                    dir ("${workPath}"){
+                        script {  
+                            bat "\"${tool 'MsBuildDefault'}\" PineDocumentos.sln /p:PackageAsSingleFile=true /p:OutDir=${pulishPath} /p:PublishProfile=${publishprofile} /p:Configuration=Release /p:Platform=\"Any CPU\" /p:ProductVersion=1.0.${env.BUILD_NUMBER} /T:Build;Publish"
+                        }
+                    }
+                }
+            }
+            stage('Upload Artifacts') {
+                steps {
+                    script{
+                        dir ("${archivePath}"){
+                            // Obtain an Artifactory server instance
+                            def server = Artifactory.server "artfactoryserver"
+                            
+                            // define the upload spec
+                            def uploadSpec = """{
+                              "files": [
+                                {
+                                  "pattern": "${publishprofile}/",
+                                  "regexp": "true",
+                                  "target": "${artifactPath}/",
+                                  "flat": "false",
+                                  "recursive": "true"
+                                  
+                                }
+                             ]
+                            }"""
+                            
+                            def downloadSpec = """{
+                              "files": [
+                                {
+                                  "pattern": "${publishprofile}/",
+                                  "regexp": "true",
+                                  "target": "${pulishPath}/{1}",
+                                  "flat": "false",
+                                  "recursive": "true"
+                                  
+                                }
+                             ]
+                            }"""
+                            
+                            def buildInfo2 = server.download spec: downloadSpec
+                            
+                            // Upload to Artifactory.
+                            def buildInfo1 = server.upload spec: uploadSpec
+                            
+                            // Merge the upload and download build-info objects.
+                            buildInfo1.append buildInfo2
+                        
+                            // Publish the build to Artifactory
+                            server.publishBuildInfo buildInfo1
+                        }
+                    }
+                }
+            }
+            stage('Deploy') {
+                steps {
+                    dir ("${archivePath}"){
+                        zip dir: "${deployPath}", glob: '', zipFile: "${filenameZip}"
+                        winRMClient	credentialsId: 'remotecreds', 
+                        hostName: "${serverHost}", 
+                        winRMOperations: [sendFile(source: "${archivePath}/${filenameZip}", destination: "${applicationServerPath}deployteste"),
+                        invokeCommand ("Expand-Archive -Path ${filePathZip} -DestinationPath ${applicationServerPath}deployteste -Force"),
+                        invokeCommand ("Remove-item ${filePathZip} -ErrorAction SilentlyContinue -Confirm:\$false -Force")]
+                        deleteDir()
+                    }
+                    dir ("${workPath}"){
+                        deleteDir()
+                        echo "teste"
+                    }
+                }    
+            }   
+        }
+    }

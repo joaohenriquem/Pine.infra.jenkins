@@ -1,0 +1,34 @@
+import groovy.json.JsonSlurper
+
+pipeline {
+         agent any
+            stages {                  
+                stage('Deploy Servidor') {
+                    steps {
+                    ansibleTower(
+                        towerServer: 'Ansible Tower',
+                        towerCredentialsId: '',
+                        templateType: 'job',
+                        jobTemplate: 'WINDOWS_WEB_IIS_DEPLOY',
+                        inventory: '',
+                        jobTags: '',
+                        skipJobTags: '',
+                        limit: '',
+                        removeColor: false,
+                        verbose: true,
+                        credential: '',
+                        extraVars: '''---
+                pastaaplicacao: "${pastaaplicacao}"
+                appversion: "${appversion}"
+                website_nameiis: "${website_nameiis}"
+                srv_site: "${srv_site}"
+                ''',
+                        async: false
+        )
+
+        }
+
+                }
+					
+        }
+}

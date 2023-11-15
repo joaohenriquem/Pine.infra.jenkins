@@ -1,0 +1,100 @@
+pipeline {
+    agent any
+	    parameters{
+            string(name: 'BuildVersion', defaultValue: "", description: "Informe a versão do Build")
+        }
+        environment {
+            // Environment Artifactory Variables
+			publishprofile = "Pine.Documentos.WebApi"
+            ArtifactsPath = "E:/JenkinsBuilds/${env.JOB_NAME}/artifacts"
+			publishPath = "E:/JenkinsBuilds/${env.JOB_NAME}/"
+            repoNameDev = "PineOnline.Documentos.WebApi.Dev"
+			repoNameStaging = "PineOnline.Documentos.WebApi.Staging"
+            deployPath = "${publishPath}${publishprofile}"
+			
+			// Environment Deploy Variables
+            serverHost = "pinehmlweb01"
+            applicationServerPath = "d:/sistemas/"
+			applicationFolderName = "deployteste"
+			applicationName = "deployteste"
+            filenameZip = "${publishprofile}.zip"
+            filePathZip = "${applicationServerPath}${applicationFolderName}/${filenameZip}"
+        }
+        stages {
+			stage('Download Artifacts and Promoting') {
+                steps {
+                    script{
+                        dir ("${publishPath}"){
+                            // Obtain an Artifactory server instance
+							def server = Artifactory.server "artfactoryserver"
+							
+                            def buildInfo = Artifactory.newBuildInfo()
+                            // Set custom build name and number.
+                            buildInfo.setName "${publishprofile}"
+                            buildInfo.setNumber "${BuildVersion}"
+							
+                            def downloadSpec = """{
+                              "files": [
+                                {
+                                  "pattern": "${repoNameDev}/${publishprofile}/",
+                                  "regexp": "true",
+                                  "target": "${publishPath}/",
+                                  "flat": "false",
+                                  "recursive": "true"
+                                  
+                                }
+                             ]
+                            }"""
+                            
+							// Download to Artifactory.
+                            def buildDownload = server.download spec: downloadSpec, buildInfo: buildInfo
+							
+                            // define the upload spec
+                            def uploadSpec = """{
+                              "files": [
+                                {
+                                  "pattern": "${publishprofile}/",
+                                  "regexp": "true",
+                                  "target": "${repoNameStaging}",
+                                  "flat": "false",
+                                  "recursive": "true"
+                                  
+                                }
+                             ]
+                            }"""
+							
+							// Upload to Artifactory.
+                            def buildUpload = server.upload spec: uploadSpec, buildInfo: buildInfo
+                            
+                            // Merge the upload and download build-info objects.
+                            buildUpload.append buildDownload
+                        
+                            // Publish the build to Artifactory
+                            server.publishBuildInfo buildInfo
+                        }
+                    }
+                }
+            }
+            stage('Deploy') {
+                steps {
+                    dir ("${publishPath}"){
+						zip dir: "${deployPath}", glob: '', zipFile: "${filenameZip}"
+					winRMClient {
+                        credentialsId: 'remotecreds'
+                        hostName: "${serverHost}"
+                        sendFile(source: "${publishPath}${filenameZip}",destination: "${applicationServerPath}${applicationFolderName}")
+                        invokeCommand ("Expand-Archive -Path ${filePathZip} -DestinationPath ${applicationServerPath}${applicationFolderName} -Force")
+                        invokeCommand ("Remove-item ${filePathZip} -ErrorAction SilentlyContinue -Confirm:\$false -Force")
+						invokeCommand ("Stop-Website -Name ${applicationName}")
+						invokeCommand ("Start-Website -Name ${applicationName}")
+                        
+						}
+						deleteDir()
+                    }
+                    dir ("${publishPath}"){
+                        deleteDir()
+                    }
+                }    
+            }   
+        }
+    }

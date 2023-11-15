@@ -1,0 +1,54 @@
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, goAheadEnv_new, goAheadEnv_old, testedc, routeexport, newApp, routeHml
+pipeline {
+    agent { 
+        label 'slave-jenkins-prod'
+    }
+	environment {
+		clusterhml = 'https://openshiftmasters.hml.pine.com:8443'
+        clusterprod = 'https://openshiftmaster.pine.com:8443'
+        registryHml = 'openregistry.hml.pine.com'
+        registryPrd = 'openregistry.pine.com.br'
+        OpenshiftCRED = credentials('openshifthmltoprd311')
+		testecredtutoia = 'default:eyJhbGciOiJSUzI1NiIsImtpZCI6IiJ9.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkZWZhdWx0Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6ImRlZmF1bHQtdG9rZW4tZHRmdDQiLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC5uYW1lIjoiZGVmYXVsdCIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6ImVmNGJjOGE0LTE2NmQtMTFlYi1iMjRiLTAwNTA1NjhiZmZiNSIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpkZWZhdWx0OmRlZmF1bHQifQ.MQst79bKoN6rSxvWZn2GdHymQo2YfX7tTnTVu0Lz5EprF5uPAI48olIn17n4_sX7iP_a4mng0UMBmsRA9Id5VmsSdsfa33KHhVb4xcMkTs7QO6kI0MhQPj09-TQd0FKqJ62LkODYvghdBiIqdUigTjqRWBOA5uYhw9DIQunDNWWuAM2uKuqC7fkwuQuxdK2KwU3FjGcgvLk3KQASIvkcdztfzCf5JTUX-Y-m7nwbEwonGWjuI367T_dHkAWxwEKcM0lhmEUM0k-ciZMF8e_8VpqSH2aKE40u6U20uVqgUP71XQCMkqMjim3kUBW1U2fopyJlOCRc_Ci6P8KxbIcKoQ'
+		
+		grupodeemail = 'tecnologia.infraestrutura@pine.com,noc@pine.com,leonardo.rocha@pine.com'
+		
+		copyPrd = "false"
+		deployedPrdNew = "null"
+		deployedPrdUpdate = "null"
+		SVC_port_numberHml = "false"
+		
+		PrdPublic_old = "false"
+		PrdPublic_new = "false"
+		producao_new = "false"
+		producao_old = "false"
+	}
+    parameters {
+        string(defaultValue: "", description: "Projeto Hml", name: 'appNamespaceHml', trim: true)
+        string(defaultValue: "", description: "Projeto", name: 'appNamespace', trim: true)
+        string(defaultValue: "", description: "Imagem", name: 'imgname')
+        string(defaultValue: "", description: "Tag", name: 'Tag')
+    }
+    stages {
+        stage('Copy Image PRD') {
+            steps {
+                script{
+                        imagehml = "docker://openregistry.hml.pine.com/'${appNamespaceHml}'/'${imgname}':'${Tag}'"
+                        imageprd = "docker://openregistry.pine.com.br/'${appNamespace}'/'${imgname}':'${Tag}'"
+                                               
+                        srccreds = credentials('openhml')
+                        destcreds = credentials('openshiftprod311')
+                        
+                        try{						
+							sh "skopeo copy --dest-creds '${destcreds}' --src-creds '${srccreds}' '${imagehml}' '${imageprd}'"	
+                        }
+                        catch(err){
+						    currentBuild.result = 'ABORTED'
+						    error('Falha ao copiar imagem docker ${imagehml} de Homologacao para Producao')	
+                        }						
+                        copyPrd = "true"
+                }
+            } 
+        }
+    }
+}  

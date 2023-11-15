@@ -1,0 +1,76 @@
+@Library('JenkinsSharedLibrary')
+import com.pine.gitLib
+def targetEnvironment, isPineFramework
+pipeline {
+    agent { 
+        label 'slave-aspnet-windows-01'
+    }
+	environment {
+        artifactoryUrl = 'https://artifactory.hml.pine.com/artifactory/api/nuget/nuget-private'
+        tfsCredential = 'jenkins-slave-user'
+        outputLineBreak = '***********************************************************************************************************************************'
+    }
+    parameters {
+	    string(defaultValue: "", description: '', name: 'projectKey') 
+		string(defaultValue: "", description: '', name: 'requestby')
+		string(defaultValue: "", description: '', name: 'repositoryUri')
+		string(defaultValue: "", description: '', name: 'buildNumber')
+        string(defaultValue: "", description: '', name: 'branchName')
+		string(defaultValue: "", description: '', name: 'commit')
+        string(defaultValue: "", description: '', name: 'solutionFile')
+        string(defaultValue: "", description: '', name: 'buildFile')
+		string(defaultValue: "", description: '', name: 'buildname')
+    }
+    stages {		
+        stage('Checkout') {
+            steps {
+                script {
+					//Define variável indicando se é um build do framework Pine
+					isPineFramework = env.projectKey.contains('Pine.Framework.')
+					//Define variável com o ambiente conforme nome da branch
+					env.branchName = env.branchName.replace('refs/heads/', '')
+					targetEnvironment = (env.branchName.toLowerCase() == 'master' ? 'prd': (env.branchName.toLowerCase().startsWith('release') ? 'hml' : 'dev'))
+					git branch: branchName, credentialsId: tfsCredential, url: env.repositoryUri
+                }
+            }
+        }
+		stage('Compliance') {
+			steps {
+				script {
+				    def gitLib = new gitLib(this, targetEnvironment)
+                    //Verifica se branch está 0 commits atrás da master (desativado, pois método não está funcionando em bat)
+                    if (!isPineFramework) {
+            		    gitLib.checkIfBehindMaster(env.branchName, env.repositoryUri)
+                    }
+					//Define a versão da aplicação
+					String versionSuffix = (targetEnvironment == 'hml' ? 'rc': (targetEnvironment == 'dev' ? 'aplha': 'stable'))
+					version = gitLib.getVersionFromBuildProps(env.buildNumber, versionSuffix)
+					echo version
+    			}
+			}
+		}
+		stage('Restore Packages') {
+			steps {
+				script {
+					bat "dotnet restore ${env.solutionFile} -s https://artifactory.hml.pine.com/artifactory/api/nuget/pine-nuget"
+				}
+			}
+		}
+		stage('Generate Package') {
+			steps {
+				script {
+					bat "dotnet build ${env.buildFile} --configuration Release --source https://artifactory.hml.pine.com/artifactory/api/nuget/pine-nuget -p:Version=${version}"
+					bat "dotnet pack ${env.buildFile} --configuration Release -p:PackageVersion=${version} --source https://artifactory.hml.pine.com/artifactory/api/nuget/pine-nuget"
+					echo "${outputLineBreak}\nPacote ${env.buildFile} publicado na versão ${version}\n${outputLineBreak}"
+				}
+			}
+		}
+		stage('Upload Artifactory') {
+			steps {
+				script {
+					bat "dotnet nuget push **/*.nupkg -s https://artifactory.hml.pine.com/artifactory/api/nuget/nuget-private"
+				}
+			}
+		}
+    }
+}

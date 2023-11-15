@@ -1,0 +1,270 @@
+apiVersion: v1
+kind: BuildConfig
+metadata:
+  annotations:
+    pipeline.alpha.openshift.io/uses: '[{"name": "jobnameS", "namespace": "projetoS", "kind":
+      "DeploymentConfig"}]'
+  creationTimestamp: null
+  labels:
+    app: appnameS
+    name: appnameS
+  name: jobnameS
+spec:
+  output: {}
+  postCommit: {}
+  resources: {}
+  runPolicy: Serial
+  source:
+    type: None
+  strategy:
+    jenkinsPipelineStrategy:
+       jenkinsfile: |-
+          pipeline{
+                agent {label 'jenkins-slave-image-mgmt'}
+                    parameters{
+                         string(name: 'TagProducao', defaultValue: "", description: "Informe a Tag de HML")
+                         string(name: 'Gmud', defaultValue: "", description: "Informe o numero da Gmud")
+                        }
+                        environment {
+                             grupodeemail = 'leandro.carmo@pine.com,carlos.justo@pine.com,rodrigo.bonfim@pine.com'
+                             appName = 'appnameS'
+                             appNamespace = 'projetoS'
+                             appNamespacePrd = 'PRDprojeto'
+                             clusterhml = 'https://lxcpnhhopen01.pine.com.br:8443'
+                             clusterprod = 'https://openshiftmasters.pine.com.br:8443'
+                             logonclusterhml = 'null'
+                             logonclusterprod = 'null'
+                             srccreds_token = 'null'
+                             destcreds_token = 'null'
+                             srccreds = 'null'
+                             destcreds = 'null'
+                             registryHml = 'registry.hml.pine.com'
+                             registryPrd = 'openregistry.pine.com'
+                             currentVersionImgHML = ''
+                             currentVersionImgPRD = ''
+                             appimagestreamHML = ''
+                             appimagestreamPRD = ''
+                             lastPushedImageidTest = 'nulo'
+                             currenttag_temp = ''
+                             lasttag_temp = ''
+                             currentImageidHML = ''
+                             currentImageidPRD = ''
+                             currentImageidPRD1 = ''
+                             lastPushedImageid = ''
+                             lasttag = ''
+                             currenttag = ''
+                             homologacao = 'nulo'
+                             producao = 'nulo'
+                             deploymentHML = 'nulo'
+                             deploymentPRD = 'nulo'
+                             taghml = 'nulo'
+                             tagprd = 'nulo'
+                             imagehml = 'nulo'
+                             imageprd = 'nulo'
+                             validaDeployPrd = 'nulo'
+                             DeployedPrd = 'nulo'
+                             Producao = 'nulo'
+                             currentVersionImgHMLSelect =  'nulo'
+                             currentImageidHMLSelect = 'nulo'
+                             currentVersionImgPRDSelect = 'nulo'
+                             currentImageidPRDSelect = 'nulo'
+                             lastPushedImageidSelect = 'nulo'
+                             currenttag_tempPrd = 'nulo'
+                             currenttagPrd = 'nulo'
+                             copyProducao = 'nulo'
+                             OpenshiftCRED = credentials('openshifthmltoprd')
+                        }
+                        stages {
+                             stage('Check version Hml') {
+                                steps {
+                                 script {
+                                   openshift.withCluster() {
+                                     openshift.withProject( "${appNamespace}" ) {
+                                       if (openshift.selector( "dc/${appName}" ).exists()) {
+                                          if (Gmud != ""){
+                                          //Tag atual de imagem Hml
+                                          currentVersionImgHMLSelect = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.from.name
+                                          currentVersionImgHML = sh(
+                                          script: "echo ${currentVersionImgHMLSelect} |grep : |cut -d':' -f 2|sed -r 's/]//g'",
+                                          returnStdout: true).trim()
+                                          
+                                          //Nome do Image Stream
+                                          appimagestreamHML = sh(
+                                          script: "echo ${currentVersionImgHMLSelect} |grep : |cut -d':' -f 1|sed -r 's/[[]//g'",
+                                          returnStdout: true).trim()
+                                          
+                                          //Hash ID atual de imagem Hml
+                                          currentImageidHMLSelect = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.lastTriggeredImage
+                                          currentImageidHML = sh(
+                                          script: "echo ${currentImageidHMLSelect} |grep : |cut -d'@' -f 2",
+                                          returnStdout: true).trim()
+                                          
+                                          lastPushedImageid = openshift.selector('istag',"${appimagestreamHML}:${TagProducao}").object().image.metadata.name
+                                          
+                                          if ( lastPushedImageid == ""){
+                                            echo "Tag informada nao existe"
+                                          }
+                                          else {
+                                            echo "Tag informada existe"
+                                            homologacao = "true"
+                                          }                                         
+                                          
+                                          currenttag_temp = sh (script: "echo ${currentVersionImgHML} | tr --delete . ",returnStdout: true).trim()
+                                          lasttag_temp = sh (script: "echo ${TagProducao} | tr --delete . ",returnStdout: true).trim()                                                                                  
+                                          currenttag = currenttag_temp.toInteger()
+                                          lasttag = lasttag_temp.toInteger()
+                                          }
+                                          else
+                                          {
+                                            currentBuild.result = 'ABORTED'
+                                          }
+                                          
+                                       }
+                                       else {
+                                         echo "A aplicacao ${appName} nao foi encontrada no Openshift de HML"
+                                         currentBuild.result = 'ABORTED'
+                                       }
+                                     }
+                                   }
+                                 }
+                                }
+                        }
+                         stage('Check version PRD') {
+                            steps {
+                                script {
+                                    openshift.withCluster('Producao') {
+                                        openshift.withProject( "${appNamespacePrd}" ) {
+                                            if (openshift.selector( "dc/${appName}" ).exists() ) {
+                                                if (homologacao.equals("true")){
+                                                
+                                                    //Tag atual de imagem Hml
+                                                    currentVersionImgPRDSelect = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.from.name
+                                                    currentVersionImgPRD = sh(
+                                                    script: "echo ${currentVersionImgPRDSelect} |grep : |cut -d':' -f 2|sed -r 's/]//g'",
+                                                    returnStdout: true).trim()
+                                                    
+                                                    //Nome do Image Stream
+                                                    appimagestreamPRD = sh(
+                                                    script: "echo ${currentVersionImgPRDSelect} |grep : |cut -d':' -f 1|sed -r 's/[[]//g'",
+                                                    returnStdout: true).trim()
+                                                    
+                                                    //Hash ID atual de imagem Hml
+                                                    currentImageidPRDSelect = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.lastTriggeredImage
+                                                    currentImageidPRD1 = sh(
+                                                    script: "echo ${currentImageidPRDSelect} |grep : |cut -d'@' -f 2",
+                                                    returnStdout: true).trim()  
+                                                    currentImageidPRD = sh(
+                                                    script: "echo ${currentImageidPRD1} |sed -r 's/[]]//g'",
+                                                    returnStdout: true).trim()
+                                                    
+                                                          
+                                                    currenttag_tempPrd = sh (script: "echo ${currentVersionImgPRD} | tr --delete . ",returnStdout: true).trim()                                                                                 
+                                                    currenttagPrd = currenttag_tempPrd.toInteger()
+                                                    
+                                                    if (lastPushedImageid != currentImageidPRD && lasttag > currenttagPrd){
+                                                            producao = "true"
+                                                        }
+                                                    else
+                                                    {
+                                                        echo "Tag da imagem ou ID são iguais ao de produção"
+                                                    }
+                                                    
+                                                    
+                                                }
+                                            }
+                                            else{
+                                                echo "A aplicacao ${appName} nao foi encontrada no Openshift de Prod"
+                                                currentBuild.result = 'ABORTED'
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        stage('Copy Image HML to PRD') {
+                            steps {
+                                script{
+                                                if (producao.equals("true")) {
+                                                    logonclusterprod = sh (
+                                                    script: "oc login -u=${OpenshiftCRED_USR} -p='${OpenshiftCRED_PSW}' --insecure-skip-tls-verify=true ${clusterprod}",
+                                                    returnStdout: true).trim()
+                                                    
+                                                    destcreds_token = sh (
+                                                    script: "oc whoami -t",
+                                                    returnStdout: true).trim()
+                                                    
+                                                    logonclusterhml = sh (
+                                                    script: "oc login -u=${OpenshiftCRED_USR} -p='${OpenshiftCRED_PSW}' --certificate-authority=/run/secrets/kubernetes.io/serviceaccount/ca.crt ${clusterhml}",
+                                                    returnStdout: true).trim()
+                                                    
+                                                    srccreds_token = sh (
+                                                    script: "oc whoami -t",
+                                                    returnStdout: true).trim()
+                                                    
+                                                    imagehml = "docker://registry.hml.pine.com/'${appNamespace}'/'${appimagestreamHML}':'${TagProducao}'"
+                                                    imageprd = "docker://openregistry.pine.com/'${appNamespace}'/'${appimagestreamHML}':'${TagProducao}'"
+                                                    
+                                                    srccreds = "${OpenshiftCRED_USR}:${srccreds_token}"
+                                                    destcreds = "${OpenshiftCRED_USR}:${destcreds_token}"
+                                                                  
+                                                    sh "skopeo --tls-verify=false copy --dest-creds '${destcreds}' --src-creds '${srccreds}' '${imagehml}' '${imageprd}'"	
+                                                    
+                                                    copyProducao = "true"	
+                                                }
+                                                else
+                                    {
+                                    echo "Falha ao copiar para produção"
+                                    currentBuild.result = 'ABORTED'
+                                    }
+                                }
+                            } 
+                        }
+                        stage('Deploy PRD') {
+                            steps {
+                                script {
+                                    openshift.withCluster('Producao') {
+                                        openshift.withProject( "${appNamespacePrd}" ) {
+                                                if (copyProducao.equals("true")){
+                                                    //Seleciona Deployment
+                                                    def deploymentPRDRollout = openshift.selector('dc',"${appName}")
+                                                    
+                                                    //Remove Trigger Current Value
+                                                      def RemoveTrigger = openshift.set('triggers',"deploymentconfig","${appname}","--remove-all")
+                                                      
+                                                    //Update Trigger
+                                                      def UpdateTrigger = openshift.set('triggers',"deploymentconfig","${appname}","--from-image=${appNamespace}/${appimagestreamHML}:${TagProducao}","-c ${appname}")
+                                                      
+                                                    //Deploy Update
+                                                      deploymentPRDRollout.rollout().latest()
+                                                }
+                                        }
+                                    }
+                                }
+                            }
+                            post {
+                            success{
+                                script {
+                                        if (producao == 'true') {
+                                             mail to: "${grupodeemail}",
+                                             from: "jenkins@pine.com",
+                                             subject: "Deploy Produção - Projeto ${appNamespace} aplicação ${appName}",
+                                             body: "Deploy da aplicação ${appName} realizado com sucesso no projeto ${appNamespace} através da Gmud ${Gmud}"
+                                        }
+                                    }
+                           }
+                         failure{
+                                script {
+                                    if (producao == 'null') {
+                                            mail to: "${grupodeemail}",
+                                            from: "jenkins@pine.com",
+                                            subject: "Deploy Produção - Projeto ${appNamespace} aplicação ${appName}",
+                                            body: "Erro no deploy da aplicação ${appName} do projeto ${appNamespace} Gmud ${Gmud}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }  
+    triggers:
+parameters:

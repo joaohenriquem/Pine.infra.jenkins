@@ -1,0 +1,172 @@
+pipeline {
+    agent { 
+        label 'jenkins-slave-dotnet'
+    }
+	environment {
+	    SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+	}
+    parameters {
+        string(defaultValue: "", description: '', name: 'repositoryUri')
+        string(defaultValue: "", description: '', name: 'branchName')
+        string(defaultValue: "", description: '', name: 'projectKey')
+        string(defaultValue: "", description: '', name: 'buildNumber')
+		string(defaultValue: "", description: '', name: 'buildname')
+        string(defaultValue: "", description: '', name: 'imagename')
+        string(defaultValue: "", description: '', name: 'projectName')
+        string(defaultValue: "", description: '', name: 'commit')
+        string(defaultValue: "enable", description: '', name: 'sonarqube')
+        string(defaultValue: "enable", description: '', name: 'fortify')
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                script {		        
+                    openshift.withCluster() {
+					    openshift.withProject( "cicd" ) {
+						    def BC_JobName = "build-${env.buildname.toLowerCase()}"
+							
+							if (openshift.selector("bc/${BC_JobName}").exists()) {
+					            def currentsource = openshift.selector("bc","${BC_JobName}").object().spec.source.git.ref
+					            def newsource = "${env.commit}"							
+					            if (currentsource == newsource){
+						            currentBuild.result = 'ABORTED'
+								    error('Já foi realizado Build dessa Branch')
+					            }
+							}
+						}
+					}
+					def gitURL = env.repositoryUri.replace('https', 'ssh')
+                    git branch: "${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}" 
+                }
+            }
+        }
+        stage('Setup') {
+            steps {
+                script {
+                    def versionFile = sh(script: 'cat version', returnStdout: true).trim()
+                    def version = "${versionFile}-${env.buildNumber}" 
+                    echo "Started job from TFS Build name: ${env.buildname}" 
+                    echo "New version: ${version}"
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                script {
+                    def sonarScanner = tool 'dotnet-sonar-scanner'
+                    withSonarQubeEnv('sonarpine') {
+                        def sonarScannerBin = "${sonarScanner}/sonar-scanner-3.2.0.1227/bin/sonar-scanner"
+                        sh "${sonarScannerBin} /k:\"${env.projectKey}\" /n:\"${env.projectKey}\" /v:\"${env.buildNumber}\" /d:sonar.host.url=\"${SONAR_HOST_URL}\" /d:sonar.sourceEncoding=UTF-8 /d:sonar.sources=."
+                    }
+                }
+            }
+        }
+        stage('Code Check') {
+             parallel {
+                 stage('Sonarqube') {
+                    when {
+                        expression { env.sonarqube == 'enable' }
+                    }
+                    steps {
+                        script {
+                            withSonarQubeEnv('sonarpine') {
+                                def sonarURL = "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${env.projectKey}"     
+                                def json = sonarURL.toURL().getText()
+                                def parsed = new groovy.json.JsonSlurper().parseText(json)
+                                
+                                while (parsed['projectStatus']['status'] == 'IN_PROGRESS') {
+                                    sleep (5)
+                                    echo "Checking Quality Gate"
+                                    json = sonarURL.toURL().getText()
+                                    parsed = new groovy.json.JsonSlurper().parseText(json)
+                                }
+                                
+                                if(parsed['projectStatus']['status'] == 'OK') {
+                                    echo "Sonar quality gateway is OK!"
+                                } else {
+                                    error "Sonar quality gateway is Failing!"
+                                }
+                            }
+                        }
+                    }
+                 }
+                 stage('Fortify') {
+                    when {
+                        expression { env.fortify == 'enable' }
+                    }
+                    steps {
+                        script {
+                            echo "Fortify is OK!"
+                        }
+                    }
+                 }
+             }
+        }
+        stage('Publish') {
+            when {
+                expression { env.branchName == 'master' || env.branchName.startsWith('release-') }
+            }
+            steps {
+                script {
+                    openshift.withCluster() {
+					    openshift.withProject( "cicd" ) {
+					        echo "Publish branch ${env.branchName}"
+                            def versionFile = sh(script: 'cat version', returnStdout: true).trim()
+                            def version = "${versionFile}-${env.buildNumber}"
+							def BC_JobName = "build-${env.buildname.toLowerCase()}"
+							def DC_Name = "${env.imagename.toLowerCase()}"
+							DC_Name1="${DC_Name.replace(".", "")}"
+							DC_Name2="${DC_Name.replace(".", "-")}"
+							
+							if (!openshift.selector( "bc/${BC_JobName}" ).exists() ) {
+							    def imageStrTag = "${env.imagename.toLowerCase()}:${version}"
+								def gitURLBuild = env.repositoryUri.replace('https://', 'ssh://svc135@')
+								
+								openshift.withProject( "${env.projectName}-dev" ) {
+                                    def imageStr = "${env.imagename.toLowerCase()}"							
+						            if (!openshift.selector("is/${imageStr}").exists()) {
+									openshift.create("imagestream","${imageStr}")
+									}
+								}
+								openshift.withProject( "cicd" ) {
+									openshift.create(openshift.process("dotnetcore-pine","-p=NAME=${BC_JobName}","-p=IMAGESTREAM=${env.imagename}:${version}","-p=NAMESPACE=${env.projectName}","-p=BRANCHNAME=${env.commit}","-p=GITURLBUILD=${gitURLBuild}"))
+									def builds = openshift.selector("bc/${BC_JobName}").related('builds')
+									timeout(5) { 
+										builds.untilEach(1) {
+											return (it.object().status.phase == "Complete")
+										}
+									}
+								}
+							}
+							else
+							{
+								openshift.withProject( "cicd" ) {
+									openshift.patch("bc/${BC_JobName}",'\'{"spec":{"output":{"to":{"name":"'+"${env.imagename}:${version}"+'"}}}}\'')
+									openshift.patch("bc/${BC_JobName}",'\'{"spec":{"source":{"git":{"ref":"'+"${env.commit}"+'"}}}}\'')
+									def StartBuild = openshift.selector("bc/${BC_JobName}").startBuild("--wait","--follow")
+									echo "${StartBuild}"
+								}
+							}	
+                                openshift.withProject( "${env.projectName}-dev" ) {							
+									if (openshift.selector( "dc/${DC_Name1}" ).exists()) {
+										DC_Name = "${DC_Name1}"
+									}
+									if (openshift.selector( "dc/${DC_Name2}" ).exists()) {
+										DC_Name = "${DC_Name2}"
+									}
+									if (openshift.selector( "dc/${DC_Name}" ).exists())  {
+										openshift.set("triggers","dc/${DC_Name}","--remove-all")
+                                        openshift.set("triggers","dc/${DC_Name}","--from-image=${env.projectName}-dev/${env.imagename}:${version}","-c ${DC_Name}")
+									}
+									else {
+										def imagestream="${env.imagename}:${version}"
+										openshift.newApp("${imagestream}","--name=${DC_Name2}").narrow('svc').expose("--hostname=${DC_Name1}.dev.pine.com")
+									}
+								}
+                        }
+                    }       
+                }
+            }
+        }
+    }
+}

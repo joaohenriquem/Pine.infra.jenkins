@@ -1,0 +1,260 @@
+@Library('JenkinsSharedLibrary')
+
+import com.pine.openshiftLib
+
+def goAheadEnv_new, routeHml, routePrd, healthCheckHml
+pipeline {
+    agent { 
+        label 'slave-jenkins-prod'
+    }
+	environment {
+		clusterhml = 'https://openshiftmasters.hml.pine.com:8443'
+        clusterprod = 'https://openshiftmaster.pine.com:8443'
+        registryHml = 'openregistry.hml.pine.com'
+        registryPrd = 'openregistry.pine.com.br'
+	
+		copyPrd = "false"
+		PrdPublic_new = "false"
+		producao_new = "false"
+	}
+    parameters {
+	    string(defaultValue: "", description: "Numero Gmud", name: 'Gmud')
+        string(defaultValue: "", description: "Projeto", name: 'appNamespace', trim: true)
+        string(defaultValue: "", description: "Aplicacao", name: 'appname')
+        string(defaultValue: "", description: "Tag", name: 'TagProd')
+    }
+    stages {
+        stage('Check version Hml') {
+            steps {
+                script {
+			        openshift.withCluster('Homologacao') {
+					    appNamespace = "${env.appNamespace.toLowerCase()}"
+						appname = "${env.appname.toLowerCase()}"
+                        openshift.withProject( "${appNamespace}" ) {
+                            if (openshift.selector( "dc/${appName}" ).exists()){
+                                if (Gmud != ""){
+								    
+                                    //Select Deployment and Version
+									try {
+										dcSelectHml = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.from.name
+									}
+								    catch (err){
+										currentBuild.result = 'ABORTED'
+										error('Jenkins sem permissao no projeto ${appNamespace} em Homologacao')
+									}
+									
+							        //Select ImageStream Name
+							        dcImageStreamHml = "${dcSelectHml}".split(':').first()
+							        dcImageStreamHml = dcImageStreamHml.substring(1,dcImageStreamHml.length())
+								    
+									routeHml = openshift.selector('route',"${appName}").object().spec.host
+									routePrd = "${routeHml}".split('hml').first() + "pine.com"
+									
+							        //Select Current Image SHA
+							        dcImageIDHml = openshift.selector('istag',"${dcImageStreamHml}:${TagProd}").object().image.dockerImageReference
+							        dcImageIDHml = "${dcImageIDHml}".split('@').last()
+							        dcImageIDHml = dcImageIDHml.substring(0,dcImageIDHml.length() - 1)
+                                }
+                                else{
+                                    currentBuild.result = 'ABORTED'
+							        error('Necessario informar numero da Gmud')
+                                }            
+                            }
+                            else{
+                                currentBuild.result = 'ABORTED'
+						        error('A aplicacao ${appName} nao foi encontrada em Homologacao')
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stage('Check version PRD') {
+            steps {
+                script {
+                    openshift.withCluster('Producao311') {
+                        openshift.withProject( "${appNamespace}" ) {
+                            if (openshift.selector( "dc/${appName}" ).exists() ){
+								
+                                //Select Deployment and Version
+								try {
+									dcSelectPrd = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.from.name
+									dcVersionPrd = "${dcSelectPrd}".split(':').last()
+									dcVersionPrd = dcVersionPrd.substring(0,dcVersionPrd.length() - 1)
+                                }
+								catch (err){
+									currentBuild.result = 'ABORTED'
+									error('Jenkins sem permissao no projeto ${appNamespace} em Producao')
+								}
+								
+							    //Select ImageStream Name
+							    dcImageStreamPrd = "${dcSelectPrd}".split(':').first()
+							    dcImageStreamPrd = dcImageStreamPrd.substring(1,dcImageStreamPrd.length())
+								
+							    //Select Current Image SHA
+							    dcImageIDPrd = openshift.selector('dc',"${appName}").object().spec.triggers.imageChangeParams.lastTriggeredImage
+							    dcImageIDPrd = "${dcImageIDPrd}".split('@').last()
+							    dcImageIDPrd = dcImageIDPrd.substring(0,dcImageIDPrd.length() - 1)
+								
+								producao_new = "true"
+                            }
+                            else{
+								dcImageIDPrd = 'nulo'
+                                echo "A aplicacao ${appName} no projeto ${appNamespace} nao foi encontrada no ambiente de Producao 3.11"
+								PrdPublic_new = "true"
+                            }
+							if (dcImageIDHml == dcImageIDPrd && dcImageIDPrd != 'nulo'){
+                                echo "O Hash das imagens são iguais, ${dcImageIDHml}"
+								goAheadEnv_new = "true"
+							}
+					    }
+					}
+                }
+            }
+        }
+        stage('Copy Image PRD') {
+		    when{
+                expression {goAheadEnv_new != "true"  || PrdPublic_new == "true" && dcImageIDPrd != 'nulo'}
+            }
+            steps {
+                script{
+                        imagehml = "docker://${registryHml}/'${appNamespace}'/'${dcImageStreamHml}':'${TagProd}'"
+                        imageprd = "docker://${registryPrd}/'${appNamespace}'/'${dcImageStreamHml}':'${TagProd}'"
+                                               
+                        srccreds = credentials('openhml')
+                        destcreds = credentials('openshiftprod311')
+                        
+                        try{						
+							sh "skopeo copy --dest-creds '${destcreds}' --src-creds '${srccreds}' '${imagehml}' '${imageprd}'"	
+                        }
+                        catch(err){
+						    currentBuild.result = 'ABORTED'
+						    error('Falha ao copiar imagem docker ${imagehml} de Homologacao para Producao')	
+                        }						
+                        copyPrd = "true"
+                }
+            } 
+        }
+		stage('Deploy First Time Prd') {
+		    when{
+                    expression {PrdPublic_new == "true" && copyPrd == "true"}
+                }
+            steps {
+                script {
+					openshift.withCluster('Producao311'){
+						openshift.withProject("${appNamespace}"){
+							dcImageStreamPrd = dcImageStreamHml
+							
+							//Deploy application
+							openshift.newApp("'${appNamespace}'/'${dcImageStreamHml}':'${TagProd}' --name='${appName}'").narrow('svc').expose("--hostname=${routePrd}")
+							
+							timeout(5) { 
+								openshift.selector('dc',"${appName}").related('pods').untilEach(1) {
+									return (it.object().status.phase == "Running")
+								}
+							}
+                        }
+                    }
+                }
+            }
+        }
+        stage('Update Prod') {
+            steps {
+                script {
+                    Map<String, String> envHml = new HashMap<String, String>();
+                    Map<String, String> envPrd = new HashMap<String, String>();
+                    openshift.withCluster('Homologacao') {
+                        openshift.withProject( "${appNamespace}" ) {
+                            //Busca variáveis de ambiente de homologação
+                            def vars = openshift.set("env","dc/${appname}","--list").out
+                            vars.split( '\n' ).tail().each { line ->
+                                param = line.split("=", 2)
+                                envHml.put(param[0], param[1])
+                            }
+                            
+                            //Consulta qual o healh check de homologação
+                            healthCheckHml = openshift.selector('dc',"${appName}").object().spec.template.spec.containers[0].readinessProbe.toString()
+                        }
+					}
+                    openshift.withCluster('Producao311') {
+                        openshift.withProject( "${appNamespace}" ) {
+                            //Busca variáveis de ambiente de produção
+                            def vars = openshift.set("env","dc/${appname}","--list").out
+                            vars.split( '\n' ).tail().each { line ->
+                                param = line.split("=", 2)
+                                envPrd.put(param[0], param[1])
+                            }
+
+                            //Altera o dc para não fazer o redeploy ao alterar a configuração e altera a imagem com a versão nova
+							openshift.set("triggers","deploymentconfigs","${appname}","--remove-all")
+							openshift.set("triggers","deploymentconfigs","${appName}","--from-image=${appNamespace}/${dcImageStreamPrd}:${TagProd}","-c ${appName}","--manual=true")
+
+                            echo '**************************************************************************************************'
+                            echo 'NOVAS VARIÁVEIS DE AMBIENTE'
+                            echo '**************************************************************************************************'
+                            //Adiona em produção as variáveis de homologação que forem novas
+							envHml.each { param ->
+								if (!envPrd.containsKey(param.getKey())) {
+									openshift.set("env","dc/${appname}","${param.getKey()}=''")
+									echo "Variável adicionada em produção: ${param.getKey()}"
+								}
+							}
+							echo '**************************************************************************************************'
+                            echo 'VARIÁVEIS DE AMBIENTE EXCLUÍDAS'
+                            echo '**************************************************************************************************'
+                            //Lista a variáveis que estão em produção, mas não existem mais em homologação (não exclui automaticamente, por hora apenas lista)
+							envPrd.each { param ->
+								if (!envHml.containsKey(param.getKey())) {
+									echo "Variável de produção não existe mais em homologação, verifique se deve ser excluída de produção: ${param.getKey()}"
+								}
+							}
+							echo '**************************************************************************************************'
+
+                            //Configura Health Check
+							def openshiftLib = new openshiftLib(this, 'prd')
+							if (healthCheckHml.contains('httpGet')) {
+                                openshiftLib.setHealthCheckHttp(appNamespace, appName)
+							} else if (healthCheckHml.contains('tcpSocket')) {
+                                openshiftLib.setHealthCheckTcp(appNamespace, appName)
+							}
+
+                            //Aplica rollout
+                            openshift.selector('dc', appName).rollout().latest()
+                        }
+					}
+                }
+            }
+        }
+        stage('Rollout') {
+		    when {
+                expression {producao_new == "true" && copyPrd == "true"}
+            }
+            steps {
+                script {
+                    openshift.withCluster('Producao311') {
+                        openshift.withProject( "${appNamespace}" ) {
+                            //Aplica rollout
+                            openshift.selector('dc', appName).rollout().latest()
+                        }
+					}
+                    //Aguarda fim do rollout
+                    def ocRollout = sh (script: """
+                        oc project ${appNamespace}
+                        oc rollout status dc/${appName}
+                    """, returnStdout: true).trim()
+                    echo ocRollout
+                }
+            }
+        }
+		stage('Dynatrace') {
+		    when {
+                expression {producao_new == "true" && copyPrd == "true"}
+            }
+			steps {
+				script {
+					sh """curl -X POST https://xnc82234.live.dynatrace.com/api/v1/events -H 'Authorization: Api-token ujxHDbF_ReiXOUWTD7kyj' -H 'Content-Type: application/json' -d '{ "eventType": "CUSTOM_DEPLOYMENT", "attachRules": { "tagRule" : { "meTypes": ["SERVICE","PROCESS_GROUP","PROCESS_GROUP_INSTANCE"], "tags": [ { "context": "CONTEXTLESS", "key": "namespace", "value": "${appNamespace}" }, { "context": "CONTEXTLESS", "key": "containername", "value": "${appname}" } ] } }, "deploymentName": "${appname}", "deploymentVersion": "${TagProd}", "deploymentProject": "${appNamespace}", "remediationAction": "http://revertMe", "ciBackLink": "Nulo", "source": "Jenkins", "customProperties": { "Jenkins Build Number": "buildID", "Git commit": "Nulo", "Gmud": "${Gmud}" } }'"""
+				}
+			}
+		}
+    }
+}  

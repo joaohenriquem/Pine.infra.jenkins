@@ -1,0 +1,33 @@
+pipeline {
+         agent any
+            environment {
+                    rebuild = 'null'
+                    userInput = 'null'
+                    goAhead1 = "null"			
+				    sqlcmd_path = "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\110\\Tools\\Binn"
+				    SQLCRED = credentials('sqlbkprestore')
+                    validaexecucao = 'null'
+                    executajob = 'null'			
+            }
+            stages {                   
+                stage('Execucao - Job') {
+                    steps {
+						ws("${sqlcmd_path}"){
+                            script {
+							    if (goAhead1 == true) {
+                                    executajob = powershell (
+                                    script: """
+									         SQLCMD -S w16pnhpsql06 -U ${SQLCRED_USR} -P ${SQLCRED_PSW} -W -Q "EXEC msdb.dbo.sp_start_job N'DBAPINE_EXPORT_TCONTA_TINDE_PD_HML'"
+											 """,
+                                    returnStdout: true)
+									
+									echo "${executajob}"
+                                }
+
+                            }
+                            
+                        }
+                    }
+                }
+            }						
+        }          

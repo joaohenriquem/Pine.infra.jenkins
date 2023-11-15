@@ -1,0 +1,61 @@
+import java.text.SimpleDateFormat
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, version, versionFile, versionBuild, passarSonar, currentversion
+
+pipeline {
+    agent { 
+        label 'slave-jenkins-flutter'
+    }
+
+    environment {
+	    SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+	}
+
+    parameters {
+	    string(defaultValue: "", description: '', name: 'projectKey') 
+		string(defaultValue: "", description: '', name: 'requestby')
+		string(defaultValue: "", description: '', name: 'repositoryUri')
+		string(defaultValue: "", description: '', name: 'buildNumber')
+        string(defaultValue: "", description: '', name: 'branchName')
+		string(defaultValue: "", description: '', name: 'commit')
+		string(defaultValue: "", description: '', name: 'projectName')
+		string(defaultValue: "", description: '', name: 'imagename')
+        string(defaultValue: "", description: '', name: 'solutionFile')
+        string(defaultValue: "", description: '', name: 'buildFile')
+		string(defaultValue: "", description: '', name: 'buildname')
+        string(defaultValue: "enabled", description: '', name: 'sonarqubeStatus')
+        string(defaultValue: "enabled", description: '', name: 'fortifyStatus')
+		string(defaultValue: "", description: '', name: 'sonar_dt_limet_disable')
+    }
+    
+    stages {
+        stage('Baixar codigo do tfs') {
+            steps {
+                script {		    
+                    def gitURL = env.repositoryUri.replace('https', 'ssh')
+                    if (env.branchName.startsWith('release'))
+                    {					
+                        git branch: "Release/${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+                    }else
+                    {					
+                        git branch: "${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+                    }
+                }
+            }
+        }
+        stage('Publish to firebase') {
+            steps {
+                script {
+                    sh "su devuser01"
+                    sh "whoami"
+                    sh "echo $PATH"
+                    sh "npm install firebase-tools"
+                    sh "whereis firebase"
+                    //versionFile = sh(script: 'whoami', returnStdout: true)
+                    //echo "${versionFile}"
+                    //versionFile = sh(script: './publish.sh ' + env.buildNumber, returnStdout: true)
+                    //echo "${versionFile}"
+                }
+            }
+        }
+    }
+}

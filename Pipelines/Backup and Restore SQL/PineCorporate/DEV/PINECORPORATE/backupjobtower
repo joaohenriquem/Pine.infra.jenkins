@@ -1,0 +1,44 @@
+import groovy.json.JsonSlurper
+
+pipeline {
+         agent any
+            environment {
+		        script = 'PINEDEVWEB02.pine.com.br'
+			bdname = ""
+			bkpstatus = ''
+                        rebuild = 'null'
+                        userInput = 'null'
+                        goAhead1 = "null"			
+			sqlcmd_path = "C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\110\\Tools\\Binn"
+		        SQLCRED = credentials('sqlbkprestore')
+                        validabackup = 'null'
+                        validarestore = 'null'					
+					
+            }
+            stages {                  
+                stage('MyStage') {
+                    steps {
+                    ansibleTower(
+                        towerServer: 'Ansible Tower',
+                        towerCredentialsId: '',
+                        templateType: 'job',
+                        jobTemplate: 'APing-Teste',
+                        inventory: '',
+                        jobTags: '',
+                        skipJobTags: '',
+                        limit: '',
+                        removeColor: false,
+                        verbose: false,
+                        credential: '',
+                        extraVars: '''---
+                        host: "${script}"
+                        my_var:  "Jenkins Test"''',
+                async: false
+        )
+
+        }
+
+                }
+					
+        }
+}          

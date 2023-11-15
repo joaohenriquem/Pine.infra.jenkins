@@ -1,0 +1,20 @@
+pipeline {
+	agent {
+		label 'lxrpnhpacgs02-linux-agent'
+	}
+    stages {
+
+		stage('Checkout') {
+			steps {
+				script {
+					// Armazenar valor em arquivo
+								sh "rm -rf arquivo.txt"
+								sh "touch arquivo.txt"
+								sh "echo '#!/bin/sh'>./arquivo.txt"
+					echo "${changenumber}"
+					echo "${descricao}"
+				}
+			}
+		}
+	}
+}

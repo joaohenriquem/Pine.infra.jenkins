@@ -1,0 +1,92 @@
+def buildPatch, BC_JobName, BC_JobName_Dev, BC_JobName_Hml, json_path, VersionBranch
+pipeline {
+    agent { 
+        label 'jenkins-slave-node-fortify'
+    }
+	environment {
+	    SHORT_JOB_NAME = "${env.JOB_NAME}".split('/').last()
+	}
+    parameters {
+	    string(defaultValue: "", description: '', name: 'projectKey') 
+		string(defaultValue: "", description: '', name: 'requestby')
+		string(defaultValue: "", description: '', name: 'repositoryUri')
+		string(defaultValue: "", description: '', name: 'buildNumber')
+        string(defaultValue: "", description: '', name: 'branchName')
+		string(defaultValue: "", description: '', name: 'buildname')
+		string(defaultValue: "", description: '', name: 'commit')
+		string(defaultValue: "", description: '', name: 'projectName')
+		string(defaultValue: "", description: '', name: 'folderSource')
+        string(defaultValue: "enable", description: '', name: 'fortify')
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+					//Replace https to ssh
+					def gitURL = env.repositoryUri.replace('https', 'ssh')
+					
+					//Branch Name
+					if (env.branchName.startsWith('desenvolvimento'))
+					{					
+						git branch: "${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					}
+					
+					if (env.branchName.startsWith('release'))
+					{					
+						git branch: "Release/${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					}
+					if (env.branchName.startsWith('hotfix'))
+					{					
+						echo "Branch: Hotfix/${env.branchName}"
+						git branch: "Hotfix/${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					}
+					if (env.branchName.startsWith('desenvolvimento') || env.branchName.startsWith('Desenvolvimento'))
+					{					
+						git branch: "${env.branchName}", credentialsId: 'SshCredTfs', url: "${gitURL}"
+					}
+                }
+            }
+        }
+		stage('Fortify') {
+			steps {
+				script {
+					dir ("${env.folderSource}"){
+						def FortifyHome = '/opt/Fortify/Fortify_SCA_and_Apps_19.1.0/bin/'
+						if (env.branchName.startsWith('release'))
+						{					
+							VersionBranch="release"
+						}
+						if (env.branchName.startsWith('desenvolvimento'))
+						{					
+							VersionBranch="desenvolvimento"
+						}
+						if (env.branchName.startsWith('feature'))
+						{					
+							VersionBranch="release"
+						}
+						if (env.branchName.startsWith('hotfix'))
+						{					
+							VersionBranch="release"
+						}
+						//sh "java -jar \"${FortifyHome}fortify-api-client-0.0.3.jar\" create -n \"${env.projectKey.toLowerCase()}\" -v \"${VersionBranch}\""
+						sh "\"${FortifyHome}fortifyupdate\" -url \"https://fortify.pine.com/ssc\" -acceptKey -acceptSSLCertificate"
+						sh "\"${FortifyHome}sourceanalyzer\" -b \"${env.buildname.toLowerCase()}\" -clean "						
+						sh """ ${FortifyHome}sourceanalyzer -b "${env.buildname.toLowerCase()}" "." -exclude "build/" -exclude "node_modules/" -exclude "prerendered/" """
+						sh "\"${FortifyHome}sourceanalyzer\" -b \"${env.buildname.toLowerCase()}\" -scan -f \"results.fpr\" "
+						sh "\"${FortifyHome}fortifyclient\" -url \"https://fortify.pine.com/ssc\" -authtoken \"abc5cf05-ce79-43bf-b14e-04ead4f0eb3d\" uploadFPR -f \"results.fpr\" -project \"${env.projectKey.toLowerCase()}\" -version \"${VersionBranch}\" "
+						
+						sh "java -jar \"${FortifyHome}fortify-api-client-0.0.3.jar\" waitArtifactProcess -n \"${env.projectKey.toLowerCase()}\" -v \"${VersionBranch}\""
+					    fortifyResult = sh(returnStdout:true , script: "java -jar \"${FortifyHome}\"fortify-api-client-0.0.3.jar report -n \"${env.projectKey.toLowerCase()}\" -v \"${VersionBranch}\"").trim()
+					    
+						echo "${fortifyResult}"
+								
+						if (fortifyResult.contains('Critical')){
+							currentBuild.result = 'Failure: Foram encontradas vulnerabilidades críticas no código-fonte. Favor corrigir !'
+							error "Foram encontradas vulnerabilidades críticas no código-fonte. Favor corrigir !" 
+						}
+					}
+				}
+			}
+		}
+    }
+}

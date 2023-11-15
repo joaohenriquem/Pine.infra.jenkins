@@ -1,0 +1,265 @@
+apiVersion: v1
+kind: BuildConfig
+metadata:
+  annotations:
+    pipeline.alpha.openshift.io/uses: '[{"name": "appnameS", "namespace": "projetoS", "kind":
+      "DeploymentConfig"}]'
+  creationTimestamp: null
+  labels:
+    app: appnameS
+    name: appnameS
+  name: appnameS
+spec:
+  output: {}
+  postCommit: {}
+  resources: {}
+  runPolicy: Serial
+  source:
+    type: None
+  strategy:
+    jenkinsPipelineStrategy:
+       jenkinsfile: |-
+            pipeline {
+                agent any
+                
+                environment {
+                    rebuild = 'null'
+                    baseIsTag = "appnameS"
+                    baseImgNamespace = "projetoS"
+                    userInput = 'null'
+                    appName = "appnameS"
+                    appNamespace = "projetoS"
+                    appNamespaceDev = ""
+                    lastPushedImageid = 'null'
+                    currentImageid = 'null'
+                    latestVersionImgA = 'null'
+                    currentVersionImg = 'null'
+                    appimagestream = 'null'
+                    tagging = 'null'
+                    goAhead1 = "null"
+                    goAhead2 = "null"
+                    goAheadhml = "null"
+                    verifyservice = "null"
+                    deployed = "null"
+                    deployedHml = 'null'
+                    hml = "null"
+                    lasttag = ''
+                    currenttag = ''
+                    lasttag_temp = ''
+                    currenttag_temp = ''
+                    dev = 'null'
+                    lastPushedImageidTest = "nulo"
+                }
+                stages {
+                    stage('Check base image version') {
+                        steps {
+                            script {
+                                openshift.withCluster() {
+                                    openshift.withProject("${appNamespace}") {
+                                        if (openshift.selector( "dc/${appName}" ).exists() ) {
+                                        
+                                          currentVersionImg = sh (
+                                          script: "oc describe dc ${appName} -n ${appNamespace}|grep Triggers:|awk 'FNR==1 {print \$2}' |cut -d'@' -f 2|sed -r 's/[,]//g'",
+                                          returnStdout: true).trim()
+            
+                                          appNamespaceDev = '${appNamespace}-dev'
+                                          
+                                          appimagestream = sh (
+                                          script: "oc describe dc ${appName} -n ${appNamespace}|grep Triggers:|awk 'FNR==1 {print \$2}' |cut -d'(' -f 2|cut -d'@' -f 1",
+                                          returnStdout: true).trim()
+                                          
+                                          currentImageid = sh (
+                                          script: "oc get istag/${appimagestream}:${currentVersionImg} -n ${appNamespace}  |awk 'FNR==2 {split(\$2,a,\"@\"); print a [2]}'",
+                                          returnStdout: true).trim()
+                                          
+                                          latestVersionImgA = input(
+                                            message: "Enter Tag image from Dev Registry",
+                                            parameters: [ string(defaultValue: '',
+                                            description: 'Image Tag Dev',
+                                            name: 'Tag')
+                                            ])
+                                          
+                                          lastPushedImageid = sh (
+                                          script: "oc get istag/${appimagestream}:${latestVersionImgA} -n ${appNamespaceDev} |awk 'FNR==2 {split(\$2,a,\"@\"); print a [2]}'",
+                                          returnStdout: true).trim()
+                                          
+                                          echo "$lastPushedImageid"
+                                          
+                                          if ( lastPushedImageid == ""){
+                                             echo "Tag informada nao existe"
+                                          }
+                                          else {
+                                          lastPushedImageid = sh (
+                                          script: "oc get istag/${appimagestream}:${latestVersionImgA} -n ${appNamespaceDev} |awk 'FNR==2 {split(\$2,a,\"@\"); print a [2]}'",
+                                          returnStdout: true).trim()
+                                          
+                                          echo "Tag informada existe"
+                                          
+                                          lastPushedImageidTest = "ok"
+                                          } 
+                                          
+                                          echo "$lastPushedImageidTest"
+                                           
+                                          currenttag_temp = sh (script: "echo ${currentVersionImg} | tr --delete . ",returnStdout: true).trim()
+                                          lasttag_temp = sh (script: "echo ${latestVersionImgA } | tr --delete . ",returnStdout: true).trim()                                                                                  
+                                          
+                                          currenttag = currenttag_temp.toInteger()
+                                          lasttag = lasttag_temp.toInteger()
+                                          
+                                        }
+                                        else {
+                                          echo "A aplicacao ${appName} nao foi encontrada no Openshift"
+                                          return
+                                        }
+                                    }
+                                }
+                            }
+                            script {
+                                if ((lastPushedImageid == currentImageid) ||(lastPushedImageid != currentImageid && lasttag <= currenttag) ){
+                                    echo "O Hash da ultima e atual imagem são iguais, ${currentImageid}"
+                                }
+                                if (lastPushedImageidTest == "nulo"){
+                                    echo "$lastPushedImageidTest igual a nulo"
+                                }
+                                else{
+                                      rebuild = "true"
+                                    echo "O Hash da ultima e atual imagem são diferente ou nao existe}"
+                                }
+                            }
+                        }
+                    }
+                    stage('Aprovacao - Gestor de Conf') {
+                        steps {
+                            script {
+                                   	
+                                   if (rebuild.equals("true")) {
+                                       goAhead1 = false
+                                       
+                                           mail to: "Lucas.Scolastico@pine.com",
+                                           from: "jenkins@pine.com",
+                                           subject: "Aprovação Deploy HML - Aplicação ${appName} tag ${latestVersionImgA}",
+                                           body: "Deploy da aplicação ${appName} tag ${latestVersionImgA} pendente de aprovação"
+                                    
+                                        timeout(time: 1, unit: 'DAYS') {
+                                            goAhead1 = input(
+                                                id: 'userInput', message: 'Aprova a implementacao em HML?', submitter:'lucas.scolastico-edit')
+                                        }
+                                        echo "$goAhead1"
+                                    }
+                                }
+                            }
+                        }
+                    stage('Aprovacao - Gestor Area ou Responsavel') {          
+                        steps {
+                            script {
+                                   if (rebuild.equals("true")) {
+                                       goAhead2 = false
+                                       
+                                        mail to: "joao.camargos@pine.com,marcelo.matos@pine.com",
+                                        from: "jenkins@pine.com",
+                                        subject: "Aprovação Deploy HML - Aplicação ${appName} tag ${latestVersionImgA}",
+                                        body: "Deploy da aplicação ${appName} tag ${latestVersionImgA} pendente de aprovação"
+            
+                                        timeout(time: 1, unit: 'DAYS') {
+                                            goAhead2 = input(
+                                                id: 'userInput', message: 'Aprova a implementacao em HML?',submitter:'joao.camargos-edit,marcelo.matos-edit' )
+            
+                                        }
+                                    }
+                                }
+                            }
+            
+                        }                
+                  stage('Tag Image to HML') {
+                        steps {
+                          script {
+                              openshift.withCluster(){
+                                  openshift.withProject("${appNamespace}"){
+                                     if (rebuild == "true" && goAhead1 != 'null' && goAhead2 != 'null') {
+                                     echo "Tagging image ${latestVersionImgA} to HML"                                   
+                                     sh (
+                                     script: "oc tag ${appNamespaceDev}/${appimagestream}':'${latestVersionImgA} ${appNamespace}/${appimagestream}':'${latestVersionImgA}",
+                                     returnStdout: true).trim()
+                                    }
+                                }
+                            }
+                            
+                           }
+                        }
+                    }
+                 stage('Deploy Image to HML') {
+                        steps {
+                            script {
+                               openshift.withCluster(){
+                                  openshift.withProject("${appNamespace}"){
+                                     if (rebuild == "true") {
+                                     echo "Deploying image ${latestVersionImgA} to Dev"  
+                                     
+                                     exportdeploy = sh (
+                                     script: "oc export dc '${appname}' -n '${appNamespace}' -o yaml | tee '${appNamespace}'_'${appName}'.yaml",
+                                     returnStdout: true).trim()
+                                     
+                                     updatedeploy = sh (
+                                     script: "sed -i 's/name: '${appimagestream}':'${currentVersionImg}'/name: '${appimagestream}':'${latestVersionImgA}'/g' '${appNamespace}'_'${appName}'.yaml",
+                                     returnStdout: true).trim()
+                                     
+                                     applyupdate = sh (
+                                     script: "oc apply -f '${appNamespace}'_'${appName}'.yaml -n '${appNamespace}'",
+                                     returnStdout: true).trim()
+                                     
+                                     openshiftDeploy (apiURL: 'https://lxcpnhhopen01.pine.com.br:8443', authToken: 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJjaWNkIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6ImplbmtpbnMtdG9rZW4tZGtmODciLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC5uYW1lIjoiamVua2lucyIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6Ijk3OTNhOTI5LTI4NzMtMTFlOC1iYzdiLTAwNTA1NmJlNDczNyIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpjaWNkOmplbmtpbnMifQ.I1sFGg6x8jd6zeuWJDyfCXMZFZc35uqDtNglZ6cfd9I9vadu4CwO8NAXjaRuqU__uzlX2EQDTc9yi6Pfj9zDjBgPzC5zSoTbQY-o0mz5wv-rT254y7H6xMh5E-vHRhekD17hEVHeixSG21VerkzOaNsNvtceSvZjsmvfajZsgJB9YkKuxrNrtsnJE_jkFSxHKSQLdYNBiOk0K9doBxtRrtiBVYirTDgPt2cRnexAd3k31eQPemAjtLM2Wqt2IaRTIybu-xQRnUTn6JZARL06yQL_F7cK1lOUxgK8KGMN6RAJQVWshGgTVsa1gLK-nJy2UhnL2XbnjNQPk1BRx5r0NA', depCfg: "${appName}", namespace: "${appNamespace}", verbose: 'false', waitTime: '', waitUnit: 'sec')
+                                     openshiftVerifyDeployment (apiURL: 'https://lxcpnhhopen01.pine.com.br:8443', authToken: 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJjaWNkIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6ImplbmtpbnMtdG9rZW4tZGtmODciLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC5uYW1lIjoiamVua2lucyIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6Ijk3OTNhOTI5LTI4NzMtMTFlOC1iYzdiLTAwNTA1NmJlNDczNyIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpjaWNkOmplbmtpbnMifQ.I1sFGg6x8jd6zeuWJDyfCXMZFZc35uqDtNglZ6cfd9I9vadu4CwO8NAXjaRuqU__uzlX2EQDTc9yi6Pfj9zDjBgPzC5zSoTbQY-o0mz5wv-rT254y7H6xMh5E-vHRhekD17hEVHeixSG21VerkzOaNsNvtceSvZjsmvfajZsgJB9YkKuxrNrtsnJE_jkFSxHKSQLdYNBiOk0K9doBxtRrtiBVYirTDgPt2cRnexAd3k31eQPemAjtLM2Wqt2IaRTIybu-xQRnUTn6JZARL06yQL_F7cK1lOUxgK8KGMN6RAJQVWshGgTVsa1gLK-nJy2UhnL2XbnjNQPk1BRx5r0NA', depCfg: "${appname}", namespace: "${appNamespace}", replicaCount: '1', verbose: 'false', verifyReplicaCount: 'false', waitTime: '', waitUnit: 'sec')
+                                     deployedHml = "ok"
+                                   }
+                                  }
+                                }
+                            }
+                        }
+                    }
+                    stage('Verify deploy HML') {
+                        steps {
+                            script {
+                               openshift.withCluster(){
+                                  openshift.withProject("${appNamespace}"){
+                                     if (rebuild == "true" && tagging != "null" && deployedHml == "ok") {
+                                     echo "Deploying image ${latestVersionImgA} to HML"                                                                
+                                     openshiftVerifyDeployment apiURL: 'https://lxcpnhhopen01.pine.com.br:8443', authToken: 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJjaWNkIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6ImplbmtpbnMtdG9rZW4tZGtmODciLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC5uYW1lIjoiamVua2lucyIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6Ijk3OTNhOTI5LTI4NzMtMTFlOC1iYzdiLTAwNTA1NmJlNDczNyIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpjaWNkOmplbmtpbnMifQ.I1sFGg6x8jd6zeuWJDyfCXMZFZc35uqDtNglZ6cfd9I9vadu4CwO8NAXjaRuqU__uzlX2EQDTc9yi6Pfj9zDjBgPzC5zSoTbQY-o0mz5wv-rT254y7H6xMh5E-vHRhekD17hEVHeixSG21VerkzOaNsNvtceSvZjsmvfajZsgJB9YkKuxrNrtsnJE_jkFSxHKSQLdYNBiOk0K9doBxtRrtiBVYirTDgPt2cRnexAd3k31eQPemAjtLM2Wqt2IaRTIybu-xQRnUTn6JZARL06yQL_F7cK1lOUxgK8KGMN6RAJQVWshGgTVsa1gLK-nJy2UhnL2XbnjNQPk1BRx5r0NA', depCfg: "${appname}", namespace: "${appNamespace}", replicaCount: '1', verbose: 'false', verifyReplicaCount: 'false', waitTime: '', waitUnit: 'sec'
+                                     hml = "true"
+                                   }
+                                  }
+                                }
+                            }
+                        }
+                    post {
+                    success {
+                        script {
+                            if (rebuild == 'true' && hml == 'true') {
+                                mail to: "lucas.scolastico@pine.com,joao.camargos@pine.com,marcelo.matos@pine.com",
+                                from: "jenkins@pine.com",
+                                subject: "HML - Deploy da aplicação ${appName} tag ${latestVersionImgA} realizado com sucesso",
+                                body: "Deploy da aplicação ${appName} tag ${latestVersionImgA} realizado com sucesso no ambiente de HML"
+                            }
+                        }
+                     }
+                     failure {
+                        script {
+                            if (rebuild == 'null' && hml != 'true') {
+                                mail to: "lucas.scolastico@pine.com,joao.camargos@pine.com,marcelo.matos@pine.com",
+                                from: "jenkins@pine.com",
+                                subject: "HML - Erro no Deploy da aplicação ${appName} tag ${latestVersionImgA}",
+                                body: "Erro no Deploy da aplicação ${appName} tag ${latestVersionImgA}"
+                                 }
+                               }
+                            }
+                        }
+                    }                                       
+                } 
+            }                                                                                                                                                 
+    triggers:
+    - imageChange:
+        from:
+          kind: ImageStreamTag
+          name: "${appimagestream}/currentVersionImg"
+          namespace: ${baseImgNamespace}
+      type: ImageChange
+parameters:
